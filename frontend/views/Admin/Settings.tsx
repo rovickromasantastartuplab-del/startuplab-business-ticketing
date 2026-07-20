@@ -49,6 +49,14 @@ export const SettingsView: React.FC = () => {
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [activeTab, setActiveTab] = useState<'team' | 'permission'>('team');
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
+  const [passwordModalMember, setPasswordModalMember] = useState<TeamMember | null>(null);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+  const [passwordLoading, setPasswordLoading] = useState(false);
+  const [resetLoadingId, setResetLoadingId] = useState<string | null>(null);
+  const [removeModalMember, setRemoveModalMember] = useState<TeamMember | null>(null);
+  const [removeLoading, setRemoveLoading] = useState(false);
 
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   React.useEffect(() => {
@@ -57,7 +65,7 @@ export const SettingsView: React.FC = () => {
       .then(data => {
         const mapped = Array.isArray(data)
           ? data.map(u => ({
-            id: u.userId,
+            id: u.userId || u.id,
             name: u.name || '',
             email: u.email,
             imageUrl: u.imageUrl || null,
@@ -120,6 +128,7 @@ export const SettingsView: React.FC = () => {
       headers: {
         'Content-Type': 'application/json',
       },
+      credentials: 'include',
       body: JSON.stringify({
         email: inviteData.email,
         role: UserRole.STAFF,
@@ -141,6 +150,72 @@ export const SettingsView: React.FC = () => {
     setInviteData({ email: '', role: 'STAFF', perspective: UserRole.STAFF, permissions: ['view_events'] });
     setIsInviteModalOpen(false);
     setNotification({ message: 'Invitation sent successfully.', type: 'success' });
+  };
+
+  const handleSendPasswordReset = async (member: TeamMember) => {
+    if (!member.id) return;
+    setResetLoadingId(member.id);
+    try {
+      await apiService.sendPasswordReset(member.id);
+      setNotification({ message: `Password reset email sent to ${member.email}.`, type: 'success' });
+    } catch (err: any) {
+      setNotification({ message: err.message || 'Failed to send reset email.', type: 'error' });
+    } finally {
+      setResetLoadingId(null);
+    }
+  };
+
+  const openSetPasswordModal = (member: TeamMember) => {
+    setPasswordModalMember(member);
+    setNewPassword('');
+    setConfirmPassword('');
+    setPasswordError('');
+  };
+
+  const closeSetPasswordModal = () => {
+    setPasswordModalMember(null);
+    setNewPassword('');
+    setConfirmPassword('');
+    setPasswordError('');
+    setPasswordLoading(false);
+  };
+
+  const handleSetPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passwordModalMember?.id) return;
+    setPasswordError('');
+    if (!newPassword || newPassword.length < 8) {
+      setPasswordError('Password must be at least 8 characters');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('Passwords do not match');
+      return;
+    }
+    setPasswordLoading(true);
+    try {
+      await apiService.setUserPassword(passwordModalMember.id, newPassword);
+      setNotification({ message: `Password updated for ${passwordModalMember.email}.`, type: 'success' });
+      closeSetPasswordModal();
+    } catch (err: any) {
+      setPasswordError(err.message || 'Failed to set password.');
+      setPasswordLoading(false);
+    }
+  };
+
+  const handleRemoveStaff = async () => {
+    if (!removeModalMember?.id) return;
+    setRemoveLoading(true);
+    try {
+      await apiService.removeStaffUser(removeModalMember.id);
+      setTeamMembers(prev => prev.filter(m => m.id !== removeModalMember.id));
+      setNotification({ message: `${removeModalMember.email} was removed from the team.`, type: 'success' });
+      setRemoveModalMember(null);
+    } catch (err: any) {
+      setNotification({ message: err.message || 'Failed to remove staff.', type: 'error' });
+    } finally {
+      setRemoveLoading(false);
+    }
   };
 
   const PermissionShield: React.FC<{ active?: boolean, onClick?: () => void, disabled?: boolean }> = ({ active = false, onClick, disabled = false }) => (
@@ -214,6 +289,8 @@ export const SettingsView: React.FC = () => {
                     <tr>
                       <th className="px-10 py-6 text-[9px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.2em]">Name</th>
                       <th className="px-10 py-6 text-[9px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.2em]">Position</th>
+                      <th className="px-10 py-6 text-[9px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.2em]">Password</th>
+                      <th className="px-10 py-6 text-[9px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.2em]">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#2E2E2F]/10">
@@ -242,6 +319,38 @@ export const SettingsView: React.FC = () => {
                         <td className="px-10 py-8">
                           <div className="text-[13px] font-black text-[#2E2E2F] uppercase tracking-widest">{member.role}</div>
                           <div className="text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-[0.2em] mt-1">{member.perspective} HUB</div>
+                        </td>
+                        <td className="px-10 py-8">
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <button
+                              type="button"
+                              disabled={resetLoadingId === member.id}
+                              onClick={() => handleSendPasswordReset(member)}
+                              className="min-h-[32px] px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#F2F2F2] border border-[#2E2E2F]/20 text-[#2E2E2F] hover:bg-[#38BDF2] hover:text-[#F2F2F2] transition-colors disabled:opacity-50"
+                            >
+                              {resetLoadingId === member.id ? 'Sending...' : 'Send reset email'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openSetPasswordModal(member)}
+                              className="min-h-[32px] px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#38BDF2] text-[#F2F2F2] hover:bg-[#2E2E2F] transition-colors"
+                            >
+                              Set password
+                            </button>
+                          </div>
+                        </td>
+                        <td className="px-10 py-8">
+                          {member.perspective === UserRole.STAFF ? (
+                            <button
+                              type="button"
+                              onClick={() => setRemoveModalMember(member)}
+                              className="min-h-[32px] px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#2E2E2F] text-[#F2F2F2] hover:bg-[#38BDF2] transition-colors"
+                            >
+                              Remove
+                            </button>
+                          ) : (
+                            <span className="text-[10px] font-bold text-[#2E2E2F]/40 uppercase tracking-widest">—</span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -326,6 +435,62 @@ export const SettingsView: React.FC = () => {
             <Button type="submit" className="flex-[2]">Send Invite</Button>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        isOpen={!!passwordModalMember}
+        onClose={closeSetPasswordModal}
+        title={passwordModalMember ? `Set password for ${passwordModalMember.name || passwordModalMember.email}` : 'Set password'}
+        size="lg"
+      >
+        <form onSubmit={handleSetPasswordSubmit} className="space-y-6 px-2">
+          <Input
+            label="New Password"
+            type="password"
+            required
+            className="w-full py-5 px-6 rounded-2xl bg-[#F2F2F2] border-[#2E2E2F]/20 text-base"
+            value={newPassword}
+            onChange={(e: any) => setNewPassword(e.target.value)}
+          />
+          <Input
+            label="Confirm Password"
+            type="password"
+            required
+            className="w-full py-5 px-6 rounded-2xl bg-[#F2F2F2] border-[#2E2E2F]/20 text-base"
+            value={confirmPassword}
+            onChange={(e: any) => setConfirmPassword(e.target.value)}
+          />
+          {passwordError && <div className="text-[#2E2E2F] text-sm font-bold">{passwordError}</div>}
+          <div className="pt-4 flex flex-col sm:flex-row gap-4">
+            <Button type="button" className="flex-1" onClick={closeSetPasswordModal}>Cancel</Button>
+            <Button type="submit" className="flex-[2]" disabled={passwordLoading}>
+              {passwordLoading ? 'Saving...' : 'Update Password'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        isOpen={!!removeModalMember}
+        onClose={() => !removeLoading && setRemoveModalMember(null)}
+        title="Remove staff member"
+        size="lg"
+      >
+        <div className="space-y-6 px-2">
+          <p className="text-[#2E2E2F]/80 font-medium text-sm leading-relaxed">
+            Remove <span className="font-black">{removeModalMember?.name || removeModalMember?.email}</span>
+            {removeModalMember?.email ? ` (${removeModalMember.email})` : ''} from the team?
+            This deletes their account and they will not be able to log in.
+          </p>
+          <div className="pt-4 flex flex-col sm:flex-row gap-4">
+            <Button type="button" className="flex-1" onClick={() => setRemoveModalMember(null)} disabled={removeLoading}>
+              Cancel
+            </Button>
+            <Button type="button" className="flex-[2]" onClick={handleRemoveStaff} disabled={removeLoading}>
+              {removeLoading ? 'Removing...' : 'Remove staff'}
+            </Button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

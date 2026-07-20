@@ -14,6 +14,8 @@ import { SettingsView } from './views/Admin/Settings';
 import { LoginPerspective } from './views/Auth/Login';
 import { SignUpView } from './views/Auth/SignUp';
 import { AcceptInvite } from './views/Auth/AcceptInvite';
+import { ForgotPassword } from './views/Auth/ForgotPassword';
+import { ResetPassword } from './views/Auth/ResetPassword';
 import { ICONS } from './constants';
 import { Button, Input, Modal } from './components/Shared';
 import { UserRole } from './types';
@@ -36,6 +38,7 @@ const PortalLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => 
   const [userMenuOpen, setUserMenuOpen] = React.useState(false);
   const [profileModalOpen, setProfileModalOpen] = React.useState(false);
   const [nameInput, setNameInput] = React.useState('');
+  const [emailInput, setEmailInput] = React.useState('');
   const [avatarPreview, setAvatarPreview] = React.useState<string | null>(null);
   const [avatarFile, setAvatarFile] = React.useState<File | null>(null);
   const [profileLoading, setProfileLoading] = React.useState(false);
@@ -60,6 +63,7 @@ const PortalLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => 
       if (res.ok) {
         const data = await res.json();
         setNameInput(data.name || '');
+        setEmailInput(data.email || '');
         setAvatarPreview(data.imageUrl || null);
         setAvatarFile(null);
         if (data?.role && data?.email) {
@@ -100,8 +104,14 @@ const PortalLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => 
     setProfileError(''); setProfileSuccess(''); setProfileLoading(true);
     try {
       const trimmedName = nameInput.trim();
+      const trimmedEmail = emailInput.trim().toLowerCase();
       if (!trimmedName) throw new Error('Name is required.');
+      if (!trimmedEmail) throw new Error('Email is required.');
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+        throw new Error('Invalid email format.');
+      }
       let nextName = trimmedName;
+      let nextEmail = email || trimmedEmail;
       let nextImageUrl = avatarPreview || imageUrl || null;
 
       if (avatarFile) {
@@ -138,10 +148,25 @@ const PortalLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => 
         if (!nextImageUrl && payload?.imageUrl) nextImageUrl = payload.imageUrl;
       }
 
-      if (role && email) {
+      if (trimmedEmail !== (email || '').trim().toLowerCase()) {
+        const res = await fetch(`${API}/api/user/email`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ email: trimmedEmail })
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.error || 'Failed to update email.');
+        }
+        const payload = await res.json().catch(() => ({}));
+        nextEmail = payload?.email || trimmedEmail;
+      }
+
+      if (role && nextEmail) {
         setUser({
           role,
-          email,
+          email: nextEmail,
           name: nextName,
           imageUrl: nextImageUrl,
           canViewEvents,
@@ -467,11 +492,17 @@ const PortalLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => 
               value={nameInput}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNameInput(e.target.value)}
             />
+            <Input
+              label="Email"
+              type="email"
+              value={emailInput}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEmailInput(e.target.value)}
+            />
             {profileError && <p className="text-xs text-[#2E2E2F] font-bold">{profileError}</p>}
             {profileSuccess && <p className="text-xs text-[#2E2E2F] font-bold">{profileSuccess}</p>}
             <div className="flex gap-3 pt-2">
               <Button variant="outline" className="flex-1" onClick={() => setProfileModalOpen(false)}>Cancel</Button>
-              <Button className="flex-1" onClick={handleSaveProfile} disabled={profileLoading || !nameInput.trim()}>
+              <Button className="flex-1" onClick={handleSaveProfile} disabled={profileLoading || !nameInput.trim() || !emailInput.trim()}>
                 {profileLoading ? 'Saving...' : 'Save'}
               </Button>
             </div>
@@ -532,12 +563,38 @@ const PublicLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => 
   </div>
 );
 
+/** HashRouter + Supabase recovery links land as #access_token=...&type=recovery */
+const AuthRecoveryListener: React.FC = () => {
+  const navigate = useNavigate();
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        navigate('/reset-password', { replace: true });
+      }
+    });
+
+    (async () => {
+      const hash = window.location.hash || '';
+      if (!hash.includes('type=recovery')) return;
+      // Let Supabase parse tokens from the hash before we replace the route
+      await supabase.auth.getSession();
+      navigate('/reset-password', { replace: true });
+    })();
+
+    return () => subscription.unsubscribe();
+  }, [navigate]);
+  return null;
+};
+
 const App: React.FC = () => (
   <Router>
+    <AuthRecoveryListener />
     <Routes>
       <Route path="/login" element={<LoginPerspective />} />
       <Route path="/signup" element={<SignUpView />} />
       <Route path="/accept-invite" element={<AcceptInvite />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/" element={<PublicLayout><EventList /></PublicLayout>} />
       <Route path="/events/:slug" element={<PublicLayout><EventDetails /></PublicLayout>} />
       <Route path="/events/:slug/register" element={<PublicLayout><RegistrationForm /></PublicLayout>} />

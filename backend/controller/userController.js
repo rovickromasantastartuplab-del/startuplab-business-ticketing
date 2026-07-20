@@ -97,6 +97,63 @@ export const updateUserName = async (req, res) => {
     }
 }
 
+export const updateUserEmail = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const rawEmail = req.body?.email;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!rawEmail || typeof rawEmail !== 'string') {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    const email = rawEmail.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    const currentEmail = (req.user?.email || '').trim().toLowerCase();
+    if (email === currentEmail) {
+      const { data, error } = await db
+        .from('users')
+        .select('userId, name, email, role, imageUrl')
+        .eq('userId', userId)
+        .maybeSingle();
+      if (error) return res.status(500).json({ error: error.message });
+      if (!data) return res.status(404).json({ error: 'User not found' });
+      return res.json(data);
+    }
+
+    const { data: existing, error: existingError } = await db
+      .from('users')
+      .select('userId, email')
+      .eq('email', email)
+      .maybeSingle();
+    if (existingError) return res.status(500).json({ error: existingError.message });
+    if (existing?.userId && existing.userId !== userId) {
+      return res.status(409).json({ error: 'That email is already in use' });
+    }
+
+    const { error: authError } = await db.auth.admin.updateUserById(userId, {
+      email,
+      email_confirm: true,
+    });
+    if (authError) return res.status(500).json({ error: authError.message });
+
+    const { data, error } = await db
+      .from('users')
+      .update({ email })
+      .eq('userId', userId)
+      .select('userId, name, email, role, imageUrl')
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: 'User not found' });
+    return res.json(data);
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
 export const getRole = async (req, res) => {
     try {
         // TEMP: fetch the first user's role
@@ -263,4 +320,131 @@ export const getRoleByEmail = async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
+};
+
+async function requireAdmin(req) {
+  let requesterRole = req.user?.role;
+  if (requesterRole === 'ADMIN') return true;
+
+  const requesterId = req.user?.id;
+  const requesterEmail = req.user?.email;
+  let roleRow = null;
+  if (requesterId) {
+    const byUserId = await db.from('users').select('role').eq('userId', requesterId).maybeSingle();
+    roleRow = byUserId.data;
+    if (!roleRow || byUserId.error) {
+      const byId = await db.from('users').select('role').eq('id', requesterId).maybeSingle();
+      roleRow = byId.data;
+    }
+  }
+  if (!roleRow && requesterEmail) {
+    const byEmail = await db.from('users').select('role').eq('email', requesterEmail).maybeSingle();
+    roleRow = byEmail.data;
+  }
+  return roleRow?.role === 'ADMIN';
+}
+
+async function findUserById(userId) {
+  let { data, error } = await db
+    .from('users')
+    .select('userId, email, name, role')
+    .eq('userId', userId)
+    .maybeSingle();
+
+  if ((!data && !error) || (error && error.message?.includes('column "userId"'))) {
+    const resp = await db
+      .from('users')
+      .select('id, email, name, role')
+      .eq('id', userId)
+      .maybeSingle();
+    data = resp.data;
+    error = resp.error;
+  }
+
+  if (error) throw new Error(error.message);
+  return data ? { userId: data.userId || data.id, email: data.email, name: data.name, role: data.role } : null;
+}
+
+export const sendPasswordReset = async (req, res) => {
+  try {
+    if (!(await requireAdmin(req))) return res.status(403).json({ error: 'Forbidden' });
+
+    const { id } = req.params;
+    const user = await findUserById(id);
+    if (!user?.email) return res.status(404).json({ error: 'User not found' });
+
+    const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
+    if (!frontendUrl) return res.status(500).json({ error: 'FRONTEND_URL is not configured' });
+
+    const { error } = await db.auth.resetPasswordForEmail(user.email, {
+      redirectTo: `${frontendUrl}/`,
+    });
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ message: 'Password reset email sent', email: user.email });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+export const setUserPassword = async (req, res) => {
+  try {
+    if (!(await requireAdmin(req))) return res.status(403).json({ error: 'Forbidden' });
+
+    const { id } = req.params;
+    const { password } = req.body || {};
+    if (!password || typeof password !== 'string' || password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    const user = await findUserById(id);
+    if (!user?.userId) return res.status(404).json({ error: 'User not found' });
+
+    const { error } = await db.auth.admin.updateUserById(user.userId, { password });
+    if (error) return res.status(500).json({ error: error.message });
+
+    return res.json({ message: 'Password updated successfully', email: user.email });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+export const removeStaffUser = async (req, res) => {
+  try {
+    if (!(await requireAdmin(req))) return res.status(403).json({ error: 'Forbidden' });
+
+    const { id } = req.params;
+    const requesterId = req.user?.id;
+    if (requesterId && id === requesterId) {
+      return res.status(400).json({ error: 'You cannot remove your own account' });
+    }
+
+    const user = await findUserById(id);
+    if (!user?.userId) return res.status(404).json({ error: 'User not found' });
+    if (user.role !== 'STAFF') {
+      return res.status(403).json({ error: 'Only STAFF accounts can be removed' });
+    }
+
+    let { error: deleteRowError } = await db.from('users').delete().eq('userId', user.userId);
+    if (deleteRowError && deleteRowError.message?.includes('column "userId"')) {
+      const resp = await db.from('users').delete().eq('id', user.userId);
+      deleteRowError = resp.error;
+    }
+    if (deleteRowError) return res.status(500).json({ error: deleteRowError.message });
+
+    if (user.email) {
+      await db.from('invites').delete().eq('email', user.email);
+    }
+
+    const { error: authDeleteError } = await db.auth.admin.deleteUser(user.userId);
+    if (authDeleteError) {
+      return res.status(500).json({
+        error: `Removed from team, but failed to delete auth account: ${authDeleteError.message}`,
+      });
+    }
+
+    return res.json({ message: 'Staff member removed', email: user.email });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
 };

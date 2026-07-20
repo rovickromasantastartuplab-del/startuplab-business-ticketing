@@ -33,6 +33,18 @@ export const apiService = {
     return await res.json();
   },
 
+  // PATCH /api/user/email
+  updateUserEmail: async (email: string) => {
+    const res = await fetch(`${API_BASE}/api/user/email`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email })
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed to update email');
+    return await res.json();
+  },
+
   // --- Public APIs ---
 
   // GET /api/events
@@ -426,6 +438,47 @@ export const apiService = {
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(text || `Failed to update permissions: ${res.status}`);
+    }
+    return res.json();
+  },
+
+  // POST /api/users/:id/send-password-reset
+  sendPasswordReset: async (userId: string) => {
+    const res = await fetch(`${API_BASE}/api/users/${encodeURIComponent(userId)}/send-password-reset`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to send reset email: ${res.status}`);
+    }
+    return res.json();
+  },
+
+  // POST /api/users/:id/set-password
+  setUserPassword: async (userId: string, password: string) => {
+    const res = await fetch(`${API_BASE}/api/users/${encodeURIComponent(userId)}/set-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ password }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to set password: ${res.status}`);
+    }
+    return res.json();
+  },
+
+  // DELETE /api/users/:id
+  removeStaffUser: async (userId: string) => {
+    const res = await fetch(`${API_BASE}/api/users/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to remove staff: ${res.status}`);
     }
     return res.json();
   }

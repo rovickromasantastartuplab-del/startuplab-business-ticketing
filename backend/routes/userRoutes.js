@@ -1,6 +1,6 @@
 import express from 'express';
 import multer from 'multer';
-import {getUser, getAllUsers, getRole, getRoleByEmail, whoAmI, updatePermissions, updateUserName, updateUserAvatar} from "../controller/userController.js"
+import {getUser, getAllUsers, getRole, getRoleByEmail, whoAmI, updatePermissions, updateUserName, updateUserAvatar, sendPasswordReset, setUserPassword, removeStaffUser, updateUserEmail} from "../controller/userController.js"
 import { authMiddleware } from "../middleware/auth.js";
 
 const router = express.Router();
@@ -15,6 +15,10 @@ router.get('/role-by-email', getRoleByEmail);
 router.get('/user/role-by-email', getRoleByEmail);
 router.put('/users/:id/permissions', authMiddleware, updatePermissions);
 router.patch('/user/name', authMiddleware, updateUserName);
+router.patch('/user/email', authMiddleware, updateUserEmail);
 router.post('/user/avatar', authMiddleware, upload.single('image'), updateUserAvatar);
+router.post('/users/:id/send-password-reset', authMiddleware, sendPasswordReset);
+router.post('/users/:id/set-password', authMiddleware, setUserPassword);
+router.delete('/users/:id', authMiddleware, removeStaffUser);
 
 export default router;

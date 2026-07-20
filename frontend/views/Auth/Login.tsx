@@ -93,6 +93,15 @@ export const LoginPerspective: React.FC = () => {
               type="password"
               required
             />
+            <div className="flex justify-end -mt-2">
+              <button
+                type="button"
+                className="text-[#2E2E2F]/60 hover:text-[#38BDF2] transition-colors text-[11px] font-black uppercase tracking-[0.15em]"
+                onClick={() => navigate('/forgot-password')}
+              >
+                Forgot password?
+              </button>
+            </div>
             <Button
               className="w-full mt-2"
               type="submit"
