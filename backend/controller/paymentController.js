@@ -668,6 +668,7 @@ export const hitpayWebhook = async (req, res) => {
                 email: order.buyerEmail,
                 phoneNumber: order.buyerPhone || null,
                 company: order.metadata?.company || null,
+                responses: order.metadata?.customFields || null,
                 consent: true
               })
               .select('*')

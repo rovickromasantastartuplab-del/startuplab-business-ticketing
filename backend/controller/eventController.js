@@ -1,13 +1,11 @@
 import supabase from '../database/db.js';
 
-// Utility: filter events by registration window if provided
-function withinRegistrationWindow(event) {
+// Utility: event is "open" if it hasn't started yet or is currently ongoing.
+// "Closed" once it has ended (endAt if set, otherwise startAt as a fallback).
+function isEventOpen(event) {
   const now = new Date();
-  const open = event.regOpenAt ? new Date(event.regOpenAt) : null;
-  const close = event.regCloseAt ? new Date(event.regCloseAt) : null;
-  if (open && now < open) return false;
-  if (close && now > close) return false;
-  return true;
+  const end = new Date(event.endAt || event.startAt);
+  return now <= end;
 }
 
 // Utility: filter ticket types by sales window if provided
@@ -38,6 +36,7 @@ export const listEvents = async (req, res) => {
     const limit = parseInt(req.query.limit, 10) || 10;
     const offset = (page - 1) * limit;
     const search = (req.query.search || '').toString().trim();
+    const eventStatusFilter = (req.query.eventStatus || 'all').toString().toLowerCase();
 
     // 1) Fetch all events (optionally filter by status)
     let query = supabase.from('events').select('*');
@@ -48,8 +47,13 @@ export const listEvents = async (req, res) => {
     const { data: events, error: eventsError } = await query;
     if (eventsError) return res.status(500).json({ error: eventsError.message });
 
-    // 2) Apply registration window filter in code, then paginate
-    const filteredEvents = (events || []).filter(withinRegistrationWindow);
+    // 2) Apply event schedule (open/closed) filter in code, then paginate
+    let filteredEvents = events || [];
+    if (eventStatusFilter === 'open') {
+      filteredEvents = filteredEvents.filter(isEventOpen);
+    } else if (eventStatusFilter === 'closed') {
+      filteredEvents = filteredEvents.filter(e => !isEventOpen(e));
+    }
     const total = filteredEvents.length;
     const totalPages = total ? Math.ceil(total / limit) : 1;
     const pagedEvents = filteredEvents.slice(offset, offset + limit);
@@ -85,7 +89,8 @@ export const listEvents = async (req, res) => {
     const usableTicketTypes = (ticketTypes || []).filter(withinSalesWindow);
     const withTicketTypes = attachTicketTypes(pagedEvents, usableTicketTypes).map(e => ({
       ...e,
-      registrationCount: regCountMap.get(e.eventId) || 0
+      registrationCount: regCountMap.get(e.eventId) || 0,
+      eventStatus: isEventOpen(e) ? 'OPEN' : 'CLOSED'
     }));
 
     return res.json({

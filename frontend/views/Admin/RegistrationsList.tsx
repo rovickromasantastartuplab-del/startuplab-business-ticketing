@@ -2,11 +2,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { apiService } from '../../services/apiService';
-import { RegistrationView, UserRole } from '../../types';
+import { RegistrationView, UserRole, Event } from '../../types';
 import { Card, Modal, PageLoader } from '../../components/Shared';
 import { ICONS } from '../../constants';
 import { useUser } from '../../context/UserContext';
 import QRCode from 'react-qr-code';
+
+// Turns a stored responses key (e.g. "dietary_restrictions") into a readable label.
+const humanizeFieldKey = (key: string) => key
+  .replace(/_/g, ' ')
+  .replace(/\b\w/g, c => c.toUpperCase());
 
 export const RegistrationsList: React.FC = () => {
   const [regs, setRegs] = useState<RegistrationView[]>([]);
@@ -17,7 +22,7 @@ export const RegistrationsList: React.FC = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, limit: 10, total: 0, totalPages: 1 });
   const [selectedReg, setSelectedReg] = useState<RegistrationView | null>(null);
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { role, canManualCheckIn } = useUser();
   const isStaff = role === UserRole.STAFF;
   const eventId = searchParams.get('eventId');
@@ -25,6 +30,18 @@ export const RegistrationsList: React.FC = () => {
   const isServerPaged = !eventId;
   const initialLoadRef = useRef(true);
   const requestIdRef = useRef(0);
+  const [adminEvents, setAdminEvents] = useState<Event[]>([]);
+
+  useEffect(() => {
+    apiService.getAdminEvents().then(setAdminEvents).catch(() => setAdminEvents([]));
+  }, []);
+
+  const handleEventFilterChange = (nextEventId: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (nextEventId) next.set('eventId', nextEventId); else next.delete('eventId');
+    setSearchParams(next);
+    setCurrentPage(1);
+  };
 
   const filteredRegs = regs;
 
@@ -137,20 +154,34 @@ export const RegistrationsList: React.FC = () => {
             Full visibility of confirmed registrations and financial transactions.
           </p>
         </div>
-        <div className="w-full md:w-80">
-          <div className="relative group">
-            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-[#2E2E2F]/60">
-              <ICONS.Search className="h-4 w-4" strokeWidth={3} />
-            </div>
-            <input
-              type="text"
-              placeholder="Search directory..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="block w-full pl-10 pr-10 py-3 bg-[#F2F2F2] border border-[#2E2E2F]/20 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#38BDF2]/30 focus:border-[#2E2E2F] transition-colors"
-            />
-            <div className="absolute inset-y-0 right-0 pr-3 flex items-center text-[#2E2E2F]/70">
-              {isFetching && <div className="w-4 h-4 border-2 border-[#2E2E2F]/30 border-t-transparent rounded-full animate-spin" />}
+        <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
+          <div className="w-full sm:w-56">
+            <select
+              className="block w-full px-3 py-3 bg-[#F2F2F2] border border-[#2E2E2F]/20 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#38BDF2]/40 transition-colors font-medium"
+              value={eventId || ''}
+              onChange={(e) => handleEventFilterChange(e.target.value)}
+            >
+              <option value="">All Events</option>
+              {adminEvents.map((ev) => (
+                <option key={ev.eventId} value={ev.eventId}>{ev.eventName}</option>
+              ))}
+            </select>
+          </div>
+          <div className="w-full md:w-80">
+            <div className="relative group">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-[#2E2E2F]/60">
+                <ICONS.Search className="h-4 w-4" strokeWidth={3} />
+              </div>
+              <input
+                type="text"
+                placeholder="Search directory..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="block w-full pl-10 pr-10 py-3 bg-[#F2F2F2] border border-[#2E2E2F]/20 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#38BDF2]/30 focus:border-[#2E2E2F] transition-colors"
+              />
+              <div className="absolute inset-y-0 right-0 pr-3 flex items-center text-[#2E2E2F]/70">
+                {isFetching && <div className="w-4 h-4 border-2 border-[#2E2E2F]/30 border-t-transparent rounded-full animate-spin" />}
+              </div>
             </div>
           </div>
         </div>
@@ -256,6 +287,19 @@ export const RegistrationsList: React.FC = () => {
                     {selectedReg.attendeeCompany && <div className="text-[13px] text-[#2E2E2F]/70 font-bold break-words truncate min-w-0">{selectedReg.attendeeCompany}</div>}
                   </div>
                 </div>
+                {selectedReg.attendeeResponses && Object.keys(selectedReg.attendeeResponses).length > 0 && (
+                  <div className="space-y-2">
+                    <h3 className="text-[11px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.3em] mb-2">Additional Details</h3>
+                    <div className="bg-[#F2F2F2] border border-[#2E2E2F]/20 rounded-xl p-5 grid grid-cols-1 gap-3">
+                      {Object.entries(selectedReg.attendeeResponses).map(([key, value]) => (
+                        <div key={key} className="flex justify-between gap-4 text-[13px]">
+                          <span className="font-black text-[#2E2E2F]/60 uppercase tracking-wide text-[10px] shrink-0">{humanizeFieldKey(key)}</span>
+                          <span className="text-[#2E2E2F] font-bold text-right break-words min-w-0">{typeof value === 'boolean' ? (value ? 'Yes' : 'No') : (value || '—')}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <h3 className="text-[11px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.3em] mb-2">Ticket & Order</h3>
                   <div className="bg-[#F2F2F2] border border-[#2E2E2F]/20 rounded-xl p-5 grid grid-cols-1 gap-2">

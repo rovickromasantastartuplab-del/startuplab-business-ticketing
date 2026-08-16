@@ -19,9 +19,62 @@ const getReservationTtlMs = () => {
  * Body: { eventId, buyerName, buyerEmail, items: [{ ticketTypeId, quantity, price }], totalAmount, currency }
  */
 export const createOrder = async (req, res) => {
-  const { eventId, buyerName, buyerEmail, buyerPhone, company, items, totalAmount, currency } = req.body;
-  if (!eventId || !buyerName || !buyerEmail || !Array.isArray(items) || !items.length) {
+  const { eventId, buyerName, buyerEmail, buyerPhone, company, items, totalAmount, currency, customFields, couponCode } = req.body;
+  if (!eventId || !buyerName || !buyerEmail || !buyerPhone || !Array.isArray(items) || !items.length) {
     return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  // Coupon pre-check (fail fast, before reserving inventory). Read-only — the atomic
+  // redemption (the part that actually enforces single-use) happens later, once the order
+  // row exists, so `redeemedOrderId` has something to point at. See coupon-feature-plan.md.
+  const normalizedCouponCode = (couponCode || '').toString().trim().toUpperCase();
+  let couponRow = null;
+  if (normalizedCouponCode) {
+    const itemsSubtotal = items.reduce((sum, i) => sum + (Number(i.price) || 0) * (Number(i.quantity) || 0), 0);
+    if (itemsSubtotal <= 0) {
+      return res.status(400).json({ error: 'Coupons can only be applied to paid tickets' });
+    }
+    const { data: couponPrecheck, error: couponPrecheckErr } = await supabase
+      .from('coupons')
+      .select('*')
+      .eq('eventId', eventId)
+      .eq('code', normalizedCouponCode)
+      .maybeSingle();
+    if (couponPrecheckErr) return res.status(500).json({ error: couponPrecheckErr.message });
+    if (!couponPrecheck) return res.status(400).json({ error: 'Coupon code not found for this event' });
+    if (couponPrecheck.status === 'DISABLED') return res.status(400).json({ error: 'This coupon is no longer active' });
+    if ((couponPrecheck.usesCount || 0) >= (couponPrecheck.maxUses || 1)) {
+      return res.status(400).json({ error: 'This coupon has reached its usage limit' });
+    }
+    if (couponPrecheck.expiresAt && new Date(couponPrecheck.expiresAt).getTime() < Date.now()) {
+      return res.status(400).json({ error: 'This coupon has expired' });
+    }
+    couponRow = couponPrecheck;
+  }
+
+  // Admin-configured custom field validation (Phase 1 dark-launch storage/validation,
+  // hardened in Phase 5 to be type-aware). No-op — identical to legacy behavior — unless
+  // the event has formFields configured. Forward-only: never applied to orders that
+  // already exist.
+  const { data: eventForFields, error: eventFieldsErr } = await supabase
+    .from('events')
+    .select('formFields')
+    .eq('eventId', eventId)
+    .maybeSingle();
+  if (eventFieldsErr) return res.status(500).json({ error: eventFieldsErr.message });
+  const formFields = Array.isArray(eventForFields?.formFields) ? eventForFields.formFields : [];
+  if (formFields.length) {
+    // Mirrors RegistrationForm.tsx's validate(): a required checkbox must be exactly
+    // `true` (a submitted `false` is a real, valid answer for a non-required checkbox,
+    // but never satisfies a required one). Every other type requires a non-empty string.
+    const missing = formFields.filter(f => {
+      if (!f?.required) return false;
+      const value = customFields?.[f.key];
+      return f.type === 'checkbox' ? value !== true : !value?.toString?.().trim?.();
+    });
+    if (missing.length) {
+      return res.status(400).json({ error: `Missing required field(s): ${missing.map(f => f.label || f.key).join(', ')}` });
+    }
   }
 
   // track reserved stock to roll back on failure (optimistic CAS)
@@ -37,12 +90,18 @@ export const createOrder = async (req, res) => {
   };
 
   let orderId = null;
+  let redeemedCouponId = null;
   const cleanupOrder = async () => {
     if (orderId) {
       await supabase.from('tickets').delete().eq('orderId', orderId);
       await supabase.from('attendees').delete().eq('orderId', orderId);
       await supabase.from('orderItems').delete().eq('orderId', orderId);
       await supabase.from('orders').delete().eq('orderId', orderId);
+    }
+    if (redeemedCouponId && orderId) {
+      // Give the use back — a failed order shouldn't burn a coupon redemption. Atomic RPC
+      // (not a plain update): see the migration for why a client-computed decrement is unsafe.
+      await supabase.rpc('unredeem_coupon', { p_coupon_id: redeemedCouponId, p_order_id: orderId });
     }
     await rollbackReservations();
   };
@@ -88,6 +147,32 @@ export const createOrder = async (req, res) => {
     // 2) Create order
     const isFree = totalAmount === 0;
     const expiresAt = isFree ? null : new Date(Date.now() + getReservationTtlMs()).toISOString();
+
+    // Discount is computed from the submitted items' subtotal — same trust boundary as the
+    // rest of pricing on this endpoint (see coupon-feature-plan.md Non-Negotiable Constraint 3).
+    let discountApplied = null;
+    if (couponRow) {
+      const subtotalForDiscount = items.reduce((sum, i) => sum + (i.price * i.quantity), 0);
+      const rawDiscount = couponRow.discountType === 'PERCENT'
+        ? Math.round((subtotalForDiscount * couponRow.discountValue) / 100)
+        : couponRow.discountValue;
+      discountApplied = {
+        code: couponRow.code,
+        discountType: couponRow.discountType,
+        discountValue: couponRow.discountValue,
+        discountAmount: Math.max(0, Math.min(rawDiscount, subtotalForDiscount))
+      };
+    }
+
+    // Preserves the exact legacy shape (`{ company }` or `null`) when neither customFields
+    // nor a coupon are submitted, so existing readers of order.metadata?.company are unaffected.
+    let orderMetadata = null;
+    if (company || customFields || discountApplied) {
+      orderMetadata = {};
+      if (company) orderMetadata.company = company;
+      if (customFields) orderMetadata.customFields = customFields;
+      if (discountApplied) orderMetadata.coupon = discountApplied;
+    }
     const { data: orderData, error: orderErr } = await supabase
       .from('orders')
       .insert({
@@ -97,7 +182,7 @@ export const createOrder = async (req, res) => {
         buyerPhone: buyerPhone || null,
         totalAmount,
         currency,
-        metadata: company ? { company } : null,
+        metadata: orderMetadata,
         status: isFree ? 'PAID' : 'PENDING_PAYMENT',
         expiresAt
       })
@@ -132,6 +217,25 @@ export const createOrder = async (req, res) => {
       req
     });
 
+    // 2.5) Atomically redeem the coupon now that the order exists, via a Postgres function
+    // (not a plain client update): the increment and the maxUses check must happen inside the
+    // same statement, evaluated against the live row, so two concurrent orders racing on a
+    // coupon near its limit can never both push it over — this is what makes the usage cap
+    // actually hold up. Also logs a couponRedemptions row (who used it) in the same transaction.
+    if (couponRow) {
+      const { data: redeemedCoupon, error: redeemErr } = await supabase
+        .rpc('redeem_coupon', { p_coupon_id: couponRow.couponId, p_order_id: orderId });
+      if (redeemErr) {
+        await cleanupOrder();
+        return res.status(500).json({ error: redeemErr.message });
+      }
+      if (!redeemedCoupon || !redeemedCoupon.couponId) {
+        await cleanupOrder();
+        return res.status(409).json({ error: 'This coupon has just reached its usage limit. Please try again without it.' });
+      }
+      redeemedCouponId = couponRow.couponId;
+    }
+
     // 3) Create order items
     for (const item of items) {
       const { ticketTypeId, quantity, price } = item;
@@ -165,6 +269,7 @@ export const createOrder = async (req, res) => {
               email: buyerEmail,
               phoneNumber: buyerPhone || null,
               company: company || null,
+              responses: customFields || null,
               consent: true
             })
             .select('*')

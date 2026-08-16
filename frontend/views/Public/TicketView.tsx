@@ -7,6 +7,11 @@ import { Card, Badge, Button, PageLoader } from '../../components/Shared';
 import { ICONS } from '../../constants';
 import QRCode from 'react-qr-code';
 
+// Turns a stored responses key (e.g. "dietary_restrictions") into a readable label.
+const humanizeFieldKey = (key: string) => key
+  .replace(/_/g, ' ')
+  .replace(/\b\w/g, c => c.toUpperCase());
+
 export const TicketView: React.FC = () => {
   const { ticketId } = useParams<{ ticketId: string }>();
   const navigate = useNavigate();
@@ -124,6 +129,16 @@ export const TicketView: React.FC = () => {
                   <p className="text-[12px] font-bold text-[#2E2E2F] truncate">{ticket.attendeeCompany || 'N/A'}</p>
                 </div>
               </div>
+              {ticket.attendeeResponses && Object.keys(ticket.attendeeResponses).length > 0 && (
+                <div className="grid grid-cols-2 gap-4">
+                  {Object.entries(ticket.attendeeResponses).map(([key, value]) => (
+                    <div key={key}>
+                      <p className="text-[9px] font-black text-[#2E2E2F]/40 uppercase tracking-widest mb-1.5">{humanizeFieldKey(key)}</p>
+                      <p className="text-[12px] font-bold text-[#2E2E2F] truncate">{typeof value === 'boolean' ? (value ? 'Yes' : 'No') : (value || 'N/A')}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="pt-4 border-t border-[#2E2E2F]/5">
                 <p className="text-[9px] font-black text-[#2E2E2F]/40 uppercase tracking-widest mb-2">Order Tracking</p>
                 <div className="flex justify-between items-center text-xs">

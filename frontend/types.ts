@@ -12,6 +12,55 @@ export const UserRole = {
 
 export type UserRole = typeof UserRole[keyof typeof UserRole];
 
+// Admin-configurable registration form fields (Phase 2 of dynamic-registration-fields-plan.md).
+// Name and Email are always collected and are never represented here — see RESERVED_FIELD_KEYS.
+export type FormFieldType = 'text' | 'email' | 'phone' | 'select' | 'checkbox';
+
+export interface FormFieldConfig {
+  key: string;
+  label: string;
+  type: FormFieldType;
+  required: boolean;
+  options?: string[]; // only used when type === 'select'
+}
+
+// Keys that always exist as fixed fields (name/email) or are legacy fixed columns
+// (phone/company) — a custom field's generated key can never collide with these.
+export const RESERVED_FIELD_KEYS = ['name', 'email', 'phone', 'company'];
+
+// Per-event discount coupons, each with a configurable usage limit (see coupon-feature-plan.md).
+export type CouponDiscountType = 'FIXED' | 'PERCENT';
+// ACTIVE/DISABLED is an admin on/off switch, independent of usage — capacity is
+// maxUses/usesCount. A coupon can be ACTIVE and fully used at the same time.
+export type CouponStatus = 'ACTIVE' | 'DISABLED';
+
+export interface CouponRedemption {
+  redemptionId: string;
+  orderId: string;
+  redeemedAt: string;
+  buyerName?: string | null;
+  buyerEmail?: string | null;
+  totalAmount?: number | null;
+  currency?: string | null;
+}
+
+export interface Coupon {
+  couponId: string;
+  code: string;
+  eventId: string;
+  discountType: CouponDiscountType;
+  discountValue: number;
+  status: CouponStatus;
+  maxUses: number;
+  usesCount: number;
+  redeemedOrderId?: string | null;
+  redeemedAt?: string | null;
+  expiresAt?: string | null;
+  createdBy?: string | null;
+  created_at?: string;
+  redemptions?: CouponRedemption[];
+}
+
 export interface Event {
   eventId: string;
   slug: string;
@@ -26,7 +75,9 @@ export interface Event {
   regOpenAt?: string; // date string
   regCloseAt?: string; // date string
   status: EventStatus;
+  eventStatus?: 'OPEN' | 'CLOSED';
   streamingPlatform?: string;
+  formFields?: FormFieldConfig[] | null;
 
   // Audit fields from DB
   created_at?: string;
@@ -127,6 +178,7 @@ export interface RegistrationView {
   attendeeEmail: string;
   attendeePhone?: string;
   attendeeCompany?: string;
+  attendeeResponses?: Record<string, string | boolean> | null;
   ticketName: string;
   status: TicketStatus;
   paymentStatus: OrderStatus;
@@ -135,6 +187,29 @@ export interface RegistrationView {
   currency: string;
   streamingPlatform?: string | null;
   checkInTimestamp?: string;
+}
+
+export type FooterLinkType = 'CUSTOM' | 'SOCIAL';
+export type SocialPlatform = 'FACEBOOK' | 'INSTAGRAM' | 'TIKTOK' | 'X' | 'LINKEDIN' | 'YOUTUBE';
+
+export interface FooterColumn {
+  footerColumnId: string;
+  title: string;
+  sortOrder: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface FooterLink {
+  footerLinkId: string;
+  type: FooterLinkType;
+  label?: string | null;
+  platform?: SocialPlatform | null;
+  columnId?: string | null;
+  url: string;
+  sortOrder: number;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface AnalyticsSummary {

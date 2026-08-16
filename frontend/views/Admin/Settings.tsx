@@ -1,8 +1,8 @@
 
 import React, { useState } from 'react';
 import { Card, Button, Input, Badge, Modal } from '../../components/Shared';
-import { ICONS } from '../../constants';
-import { UserRole } from '../../types';
+import { ICONS, SOCIAL_ICONS, SOCIAL_PLATFORMS } from '../../constants';
+import { UserRole, FooterLink, FooterLinkType, FooterColumn, SocialPlatform } from '../../types';
 import { apiService } from '../../services/apiService';
 
 const API_BASE = import.meta.env.VITE_API_BASE;
@@ -47,7 +47,7 @@ export const SettingsView: React.FC = () => {
   };
 
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  const [activeTab, setActiveTab] = useState<'team' | 'permission'>('team');
+  const [activeTab, setActiveTab] = useState<'team' | 'permission' | 'footer'>('team');
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
   const [passwordModalMember, setPasswordModalMember] = useState<TeamMember | null>(null);
   const [newPassword, setNewPassword] = useState('');
@@ -57,6 +57,189 @@ export const SettingsView: React.FC = () => {
   const [resetLoadingId, setResetLoadingId] = useState<string | null>(null);
   const [removeModalMember, setRemoveModalMember] = useState<TeamMember | null>(null);
   const [removeLoading, setRemoveLoading] = useState(false);
+
+  // --- Footer columns + links state ---
+  const [footerColumns, setFooterColumns] = useState<FooterColumn[]>([]);
+  const [footerLinks, setFooterLinks] = useState<FooterLink[]>([]);
+  const [footerLoading, setFooterLoading] = useState(false);
+  const [footerModalOpen, setFooterModalOpen] = useState(false);
+  const [footerModalType, setFooterModalType] = useState<FooterLinkType>('CUSTOM');
+  const [editingFooterLink, setEditingFooterLink] = useState<FooterLink | null>(null);
+  const [footerForm, setFooterForm] = useState<{ label: string; platform: SocialPlatform; url: string; columnId: string }>({ label: '', platform: 'FACEBOOK', url: '', columnId: '' });
+  const [footerFormError, setFooterFormError] = useState('');
+  const [footerSaving, setFooterSaving] = useState(false);
+  const [deleteFooterLinkTarget, setDeleteFooterLinkTarget] = useState<FooterLink | null>(null);
+  const [footerDeleteLoading, setFooterDeleteLoading] = useState(false);
+
+  // --- Footer column modal state ---
+  const [columnModalOpen, setColumnModalOpen] = useState(false);
+  const [editingColumn, setEditingColumn] = useState<FooterColumn | null>(null);
+  const [columnTitle, setColumnTitle] = useState('');
+  const [columnFormError, setColumnFormError] = useState('');
+  const [columnSaving, setColumnSaving] = useState(false);
+  const [deleteColumnTarget, setDeleteColumnTarget] = useState<FooterColumn | null>(null);
+  const [columnDeleteLoading, setColumnDeleteLoading] = useState(false);
+
+  const loadFooterData = React.useCallback(() => {
+    setFooterLoading(true);
+    Promise.all([apiService.getAdminFooterColumns(), apiService.getAdminFooterLinks()])
+      .then(([columns, links]) => {
+        setFooterColumns(columns);
+        setFooterLinks(links);
+      })
+      .catch(() => { setFooterColumns([]); setFooterLinks([]); })
+      .finally(() => setFooterLoading(false));
+  }, []);
+
+  React.useEffect(() => {
+    if (activeTab === 'footer') loadFooterData();
+  }, [activeTab, loadFooterData]);
+
+  const socialLinks = footerLinks.filter(l => l.type === 'SOCIAL');
+  const linksByColumn = (columnId: string) => footerLinks.filter(l => l.type === 'CUSTOM' && l.columnId === columnId);
+
+  const openAddFooterLink = (type: FooterLinkType, columnId?: string) => {
+    setEditingFooterLink(null);
+    setFooterModalType(type);
+    setFooterForm({ label: '', platform: 'FACEBOOK', url: '', columnId: columnId || footerColumns[0]?.footerColumnId || '' });
+    setFooterFormError('');
+    setFooterModalOpen(true);
+  };
+
+  const openEditFooterLink = (link: FooterLink) => {
+    setEditingFooterLink(link);
+    setFooterModalType(link.type);
+    setFooterForm({ label: link.label || '', platform: (link.platform as SocialPlatform) || 'FACEBOOK', url: link.url, columnId: link.columnId || '' });
+    setFooterFormError('');
+    setFooterModalOpen(true);
+  };
+
+  const closeFooterModal = () => {
+    if (footerSaving) return;
+    setFooterModalOpen(false);
+    setEditingFooterLink(null);
+  };
+
+  const handleFooterFormSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFooterFormError('');
+
+    if (!footerForm.url.trim()) {
+      setFooterFormError('URL is required.');
+      return;
+    }
+    if (footerModalType === 'CUSTOM' && !footerForm.label.trim()) {
+      setFooterFormError('Label is required.');
+      return;
+    }
+    if (footerModalType === 'CUSTOM' && !footerForm.columnId) {
+      setFooterFormError('Choose a column for this link.');
+      return;
+    }
+
+    const payload = {
+      type: footerModalType,
+      url: footerForm.url.trim(),
+      ...(footerModalType === 'CUSTOM'
+        ? { label: footerForm.label.trim(), columnId: footerForm.columnId }
+        : { platform: footerForm.platform }),
+    };
+
+    setFooterSaving(true);
+    try {
+      if (editingFooterLink) {
+        const updated = await apiService.updateFooterLink(editingFooterLink.footerLinkId, payload);
+        setFooterLinks(prev => prev.map(l => l.footerLinkId === updated.footerLinkId ? updated : l));
+      } else {
+        const created = await apiService.createFooterLink(payload);
+        setFooterLinks(prev => [...prev, created]);
+      }
+      setFooterModalOpen(false);
+      setEditingFooterLink(null);
+      setNotification({ message: 'Footer link saved.', type: 'success' });
+    } catch (err: any) {
+      setFooterFormError(err.message || 'Failed to save footer link.');
+    } finally {
+      setFooterSaving(false);
+    }
+  };
+
+  const handleDeleteFooterLink = async () => {
+    if (!deleteFooterLinkTarget) return;
+    setFooterDeleteLoading(true);
+    try {
+      await apiService.deleteFooterLink(deleteFooterLinkTarget.footerLinkId);
+      setFooterLinks(prev => prev.filter(l => l.footerLinkId !== deleteFooterLinkTarget.footerLinkId));
+      setDeleteFooterLinkTarget(null);
+      setNotification({ message: 'Footer link removed.', type: 'success' });
+    } catch (err: any) {
+      setNotification({ message: err.message || 'Failed to remove footer link.', type: 'error' });
+    } finally {
+      setFooterDeleteLoading(false);
+    }
+  };
+
+  const openAddColumn = () => {
+    setEditingColumn(null);
+    setColumnTitle('');
+    setColumnFormError('');
+    setColumnModalOpen(true);
+  };
+
+  const openEditColumn = (column: FooterColumn) => {
+    setEditingColumn(column);
+    setColumnTitle(column.title);
+    setColumnFormError('');
+    setColumnModalOpen(true);
+  };
+
+  const closeColumnModal = () => {
+    if (columnSaving) return;
+    setColumnModalOpen(false);
+    setEditingColumn(null);
+  };
+
+  const handleColumnFormSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setColumnFormError('');
+    if (!columnTitle.trim()) {
+      setColumnFormError('Title is required.');
+      return;
+    }
+    setColumnSaving(true);
+    try {
+      if (editingColumn) {
+        const updated = await apiService.updateFooterColumn(editingColumn.footerColumnId, columnTitle.trim());
+        setFooterColumns(prev => prev.map(c => c.footerColumnId === updated.footerColumnId ? updated : c));
+      } else {
+        const created = await apiService.createFooterColumn(columnTitle.trim());
+        setFooterColumns(prev => [...prev, created]);
+      }
+      setColumnModalOpen(false);
+      setEditingColumn(null);
+      setNotification({ message: 'Footer column saved.', type: 'success' });
+    } catch (err: any) {
+      setColumnFormError(err.message || 'Failed to save footer column.');
+    } finally {
+      setColumnSaving(false);
+    }
+  };
+
+  const handleDeleteColumn = async () => {
+    if (!deleteColumnTarget) return;
+    setColumnDeleteLoading(true);
+    try {
+      await apiService.deleteFooterColumn(deleteColumnTarget.footerColumnId);
+      setFooterColumns(prev => prev.filter(c => c.footerColumnId !== deleteColumnTarget.footerColumnId));
+      setFooterLinks(prev => prev.filter(l => l.columnId !== deleteColumnTarget.footerColumnId));
+      setDeleteColumnTarget(null);
+      setNotification({ message: 'Footer column removed.', type: 'success' });
+    } catch (err: any) {
+      setNotification({ message: err.message || 'Failed to remove footer column.', type: 'error' });
+    } finally {
+      setColumnDeleteLoading(false);
+    }
+  };
 
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   React.useEffect(() => {
@@ -257,7 +440,8 @@ export const SettingsView: React.FC = () => {
         <div className="flex bg-[#F2F2F2] p-1 rounded-2xl border border-[#2E2E2F]/10 self-start md:self-auto shrink-0">
           {[
             { id: 'team', label: 'Team' },
-            { id: 'permission', label: 'Access Control' }
+            { id: 'permission', label: 'Access Control' },
+            { id: 'footer', label: 'Footer' }
           ].map((tab) => (
             <button
               key={tab.id}
@@ -422,6 +606,157 @@ export const SettingsView: React.FC = () => {
           </div>
         )}
 
+        {activeTab === 'footer' && (
+          <div className="space-y-10">
+            {/* Columns */}
+            <div className="space-y-6">
+              <div className="flex justify-between items-center">
+                <label className="block text-[10px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.2em] mb-3 ml-1">Footer Columns</label>
+                <Button onClick={openAddColumn}>
+                  <span className="text-[9px] font-black uppercase tracking-widest flex items-center gap-2">
+                    <ICONS.Layout className="w-3.5 h-3.5" />
+                    Add Column
+                  </span>
+                </Button>
+              </div>
+
+              {footerLoading ? (
+                <Card className="overflow-hidden border-[#2E2E2F]/10 rounded-[2.5rem] bg-[#F2F2F2]">
+                  <div className="px-10 py-10 text-center text-[12px] font-bold text-[#2E2E2F]/60 uppercase tracking-widest">Loading...</div>
+                </Card>
+              ) : footerColumns.length === 0 ? (
+                <Card className="overflow-hidden border-[#2E2E2F]/10 rounded-[2.5rem] bg-[#F2F2F2]">
+                  <div className="px-10 py-10 text-center text-[12px] font-bold text-[#2E2E2F]/60 uppercase tracking-widest">No columns yet. Add one to start adding links.</div>
+                </Card>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {footerColumns.map((column) => {
+                    const columnLinks = linksByColumn(column.footerColumnId);
+                    return (
+                      <Card key={column.footerColumnId} className="overflow-hidden border-[#2E2E2F]/10 rounded-[2rem] bg-[#F2F2F2]">
+                        <div className="flex items-center justify-between gap-4 px-8 py-6 border-b border-[#2E2E2F]/10">
+                          <div className="font-black text-[#2E2E2F] text-[15px] tracking-tight truncate">{column.title}</div>
+                          <div className="flex gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => openEditColumn(column)}
+                              className="min-h-[32px] px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#F2F2F2] border border-[#2E2E2F]/20 text-[#2E2E2F] hover:bg-[#38BDF2] hover:text-[#F2F2F2] transition-colors"
+                            >
+                              Rename
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDeleteColumnTarget(column)}
+                              className="min-h-[32px] px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#2E2E2F] text-[#F2F2F2] hover:bg-[#38BDF2] transition-colors"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                        <div className="divide-y divide-[#2E2E2F]/10">
+                          {columnLinks.length === 0 ? (
+                            <div className="px-8 py-6 text-center text-[11px] font-bold text-[#2E2E2F]/60 uppercase tracking-widest">No links yet.</div>
+                          ) : (
+                            columnLinks.map((link) => (
+                              <div key={link.footerLinkId} className="flex items-center justify-between gap-4 px-8 py-5">
+                                <div className="min-w-0">
+                                  <div className="font-black text-[#2E2E2F] text-[13px] tracking-tight truncate">{link.label}</div>
+                                  <div className="text-[11px] text-[#2E2E2F]/60 font-bold tracking-tight truncate">{link.url}</div>
+                                </div>
+                                <div className="flex gap-2 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditFooterLink(link)}
+                                    className="min-h-[28px] px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#F2F2F2] border border-[#2E2E2F]/20 text-[#2E2E2F] hover:bg-[#38BDF2] hover:text-[#F2F2F2] transition-colors"
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeleteFooterLinkTarget(link)}
+                                    className="min-h-[28px] px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#2E2E2F] text-[#F2F2F2] hover:bg-[#38BDF2] transition-colors"
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                        <div className="px-8 py-5">
+                          <button
+                            type="button"
+                            onClick={() => openAddFooterLink('CUSTOM', column.footerColumnId)}
+                            className="w-full min-h-[32px] px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#38BDF2] text-[#F2F2F2] hover:bg-[#2E2E2F] transition-colors"
+                          >
+                            + Add Link
+                          </button>
+                        </div>
+                      </Card>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Social Media Links */}
+            <div className="space-y-6">
+              <div className="flex justify-between items-center">
+                <label className="block text-[10px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.2em] mb-3 ml-1">Social Media</label>
+                <Button onClick={() => openAddFooterLink('SOCIAL')}>
+                  <span className="text-[9px] font-black uppercase tracking-widest flex items-center gap-2">
+                    <ICONS.Users className="w-3.5 h-3.5" />
+                    Add Social Link
+                  </span>
+                </Button>
+              </div>
+              <Card className="overflow-hidden border-[#2E2E2F]/10 rounded-[2.5rem] bg-[#F2F2F2]">
+                {footerLoading ? (
+                  <div className="px-10 py-10 text-center text-[12px] font-bold text-[#2E2E2F]/60 uppercase tracking-widest">Loading...</div>
+                ) : socialLinks.length === 0 ? (
+                  <div className="px-10 py-10 text-center text-[12px] font-bold text-[#2E2E2F]/60 uppercase tracking-widest">No social links yet.</div>
+                ) : (
+                  <div className="divide-y divide-[#2E2E2F]/10">
+                    {socialLinks.map((link) => {
+                      const SocialIcon = link.platform ? SOCIAL_ICONS[link.platform] : null;
+                      const platformLabel = SOCIAL_PLATFORMS.find(p => p.value === link.platform)?.label || link.platform;
+                      return (
+                        <div key={link.footerLinkId} className="flex items-center justify-between gap-4 px-10 py-6">
+                          <div className="flex items-center gap-4 min-w-0">
+                            <div className="w-10 h-10 rounded-xl bg-[#38BDF2] text-[#F2F2F2] flex items-center justify-center shrink-0">
+                              {SocialIcon ? <SocialIcon className="w-5 h-5" /> : null}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-black text-[#2E2E2F] text-[14px] tracking-tight truncate">{platformLabel}</div>
+                              <div className="text-[12px] text-[#2E2E2F]/60 font-bold tracking-tight truncate">{link.url}</div>
+                            </div>
+                          </div>
+                          <div className="flex gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => openEditFooterLink(link)}
+                              className="min-h-[32px] px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#F2F2F2] border border-[#2E2E2F]/20 text-[#2E2E2F] hover:bg-[#38BDF2] hover:text-[#F2F2F2] transition-colors"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDeleteFooterLinkTarget(link)}
+                              className="min-h-[32px] px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#2E2E2F] text-[#F2F2F2] hover:bg-[#38BDF2] transition-colors"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </Card>
+            </div>
+          </div>
+        )}
+
       </div>
 
       <Modal isOpen={isInviteModalOpen} onClose={() => setIsInviteModalOpen(false)} title="Invite Team Member" size="lg">
@@ -488,6 +823,137 @@ export const SettingsView: React.FC = () => {
             </Button>
             <Button type="button" className="flex-[2]" onClick={handleRemoveStaff} disabled={removeLoading}>
               {removeLoading ? 'Removing...' : 'Remove staff'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={footerModalOpen}
+        onClose={closeFooterModal}
+        title={editingFooterLink ? 'Edit Footer Link' : footerModalType === 'CUSTOM' ? 'Add Column Link' : 'Add Social Link'}
+        size="lg"
+      >
+        <form onSubmit={handleFooterFormSubmit} className="space-y-6 px-2">
+          {footerModalType === 'CUSTOM' ? (
+            <>
+              <div className="space-y-1.5 w-full">
+                <label className="block text-sm font-medium text-[#2E2E2F]/70">Column</label>
+                <select
+                  className="block w-full px-3 py-2 bg-[#F2F2F2] border border-[#2E2E2F]/20 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#38BDF2]/40 transition-colors font-normal py-5 px-6 rounded-2xl text-base"
+                  value={footerForm.columnId}
+                  onChange={(e) => setFooterForm({ ...footerForm, columnId: e.target.value })}
+                >
+                  <option value="" disabled>Select a column</option>
+                  {footerColumns.map((c) => (
+                    <option key={c.footerColumnId} value={c.footerColumnId}>{c.title}</option>
+                  ))}
+                </select>
+              </div>
+              <Input
+                label="Label"
+                placeholder="Privacy Policy"
+                required
+                className="w-full py-5 px-6 rounded-2xl bg-[#F2F2F2] border-[#2E2E2F]/20 text-base"
+                value={footerForm.label}
+                onChange={(e: any) => setFooterForm({ ...footerForm, label: e.target.value })}
+              />
+            </>
+          ) : (
+            <div className="space-y-1.5 w-full">
+              <label className="block text-sm font-medium text-[#2E2E2F]/70">Platform</label>
+              <select
+                className="block w-full px-3 py-2 bg-[#F2F2F2] border border-[#2E2E2F]/20 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#38BDF2]/40 transition-colors font-normal py-5 px-6 rounded-2xl text-base"
+                value={footerForm.platform}
+                onChange={(e) => setFooterForm({ ...footerForm, platform: e.target.value as SocialPlatform })}
+              >
+                {SOCIAL_PLATFORMS.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <Input
+            label="URL"
+            type="url"
+            placeholder="https://..."
+            required
+            className="w-full py-5 px-6 rounded-2xl bg-[#F2F2F2] border-[#2E2E2F]/20 text-base"
+            value={footerForm.url}
+            onChange={(e: any) => setFooterForm({ ...footerForm, url: e.target.value })}
+          />
+          {footerFormError && <div className="text-[#2E2E2F] text-sm font-bold">{footerFormError}</div>}
+          <div className="pt-4 flex flex-col sm:flex-row gap-4">
+            <Button type="button" className="flex-1" onClick={closeFooterModal} disabled={footerSaving}>Cancel</Button>
+            <Button type="submit" className="flex-[2]" disabled={footerSaving}>
+              {footerSaving ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        isOpen={!!deleteFooterLinkTarget}
+        onClose={() => !footerDeleteLoading && setDeleteFooterLinkTarget(null)}
+        title="Remove footer link"
+        size="lg"
+      >
+        <div className="space-y-6 px-2">
+          <p className="text-[#2E2E2F]/80 font-medium text-sm leading-relaxed">
+            Remove <span className="font-black">{deleteFooterLinkTarget?.label || (deleteFooterLinkTarget?.platform ? SOCIAL_PLATFORMS.find(p => p.value === deleteFooterLinkTarget.platform)?.label : '')}</span> from the footer?
+          </p>
+          <div className="pt-4 flex flex-col sm:flex-row gap-4">
+            <Button type="button" className="flex-1" onClick={() => setDeleteFooterLinkTarget(null)} disabled={footerDeleteLoading}>
+              Cancel
+            </Button>
+            <Button type="button" className="flex-[2]" onClick={handleDeleteFooterLink} disabled={footerDeleteLoading}>
+              {footerDeleteLoading ? 'Removing...' : 'Remove link'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={columnModalOpen}
+        onClose={closeColumnModal}
+        title={editingColumn ? 'Rename Column' : 'Add Footer Column'}
+        size="lg"
+      >
+        <form onSubmit={handleColumnFormSubmit} className="space-y-6 px-2">
+          <Input
+            label="Title"
+            placeholder="Platform"
+            required
+            className="w-full py-5 px-6 rounded-2xl bg-[#F2F2F2] border-[#2E2E2F]/20 text-base"
+            value={columnTitle}
+            onChange={(e: any) => setColumnTitle(e.target.value)}
+          />
+          {columnFormError && <div className="text-[#2E2E2F] text-sm font-bold">{columnFormError}</div>}
+          <div className="pt-4 flex flex-col sm:flex-row gap-4">
+            <Button type="button" className="flex-1" onClick={closeColumnModal} disabled={columnSaving}>Cancel</Button>
+            <Button type="submit" className="flex-[2]" disabled={columnSaving}>
+              {columnSaving ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        isOpen={!!deleteColumnTarget}
+        onClose={() => !columnDeleteLoading && setDeleteColumnTarget(null)}
+        title="Remove footer column"
+        size="lg"
+      >
+        <div className="space-y-6 px-2">
+          <p className="text-[#2E2E2F]/80 font-medium text-sm leading-relaxed">
+            Remove <span className="font-black">{deleteColumnTarget?.title}</span> and all its links from the footer?
+          </p>
+          <div className="pt-4 flex flex-col sm:flex-row gap-4">
+            <Button type="button" className="flex-1" onClick={() => setDeleteColumnTarget(null)} disabled={columnDeleteLoading}>
+              Cancel
+            </Button>
+            <Button type="button" className="flex-[2]" onClick={handleDeleteColumn} disabled={columnDeleteLoading}>
+              {columnDeleteLoading ? 'Removing...' : 'Remove column'}
             </Button>
           </div>
         </div>

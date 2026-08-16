@@ -51,6 +51,7 @@ const EventCard: React.FC<{ event: Event }> = ({ event }) => {
     : regClose
       ? `Closes ${formatDate(regClose.toISOString(), event.timezone, { year: 'numeric', month: 'short', day: 'numeric' })}`
       : '';
+  const isOpen = event.eventStatus !== 'CLOSED';
 
   return (
     <Card className="flex flex-col h-full border border-[#2E2E2F]/10 rounded-[1.5rem] overflow-hidden bg-[#F2F2F2] hover:border-[#38BDF2]/40 transition-colors cursor-pointer" onClick={() => navigate(`/events/${event.slug}`)}>
@@ -61,6 +62,9 @@ const EventCard: React.FC<{ event: Event }> = ({ event }) => {
           alt={event.eventName}
           className="w-full h-full object-cover"
         />
+        <div className={`absolute top-3 right-3 px-3 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wide ${isOpen ? 'bg-[#38BDF2] text-[#F2F2F2]' : 'bg-[#2E2E2F]/80 text-[#F2F2F2]'}`}>
+          {isOpen ? 'Open' : 'Closed'}
+        </div>
       </div>
       {/* Content Section */}
       <div className="p-6 flex-1 flex flex-col">
@@ -71,7 +75,7 @@ const EventCard: React.FC<{ event: Event }> = ({ event }) => {
           {event.summaryLine || 'Explore our latest projects, network with StartupLab founders and learn about future initiatives.'}
         </div>
         <div className="flex flex-wrap gap-2 text-[12px] font-medium text-[#2E2E2F]/70 mb-3">
-          <span className="text-[#38BDF2]">{event.registrationCount ?? 0} registered / {(event.ticketTypes || []).reduce((sum, t) => sum + (t.quantityTotal || 0), 0)} slots</span>
+          <span className="text-[#38BDF2]">{(event.ticketTypes || []).reduce((sum, t) => sum + (t.quantityTotal || 0), 0)} slots</span>
           <span className="text-[#2E2E2F]/60">•</span>
           <span>{event.location}</span>
           <span className="text-[#2E2E2F]/60">•</span>
@@ -92,6 +96,7 @@ export const EventList: React.FC = () => {
   const [isFetching, setIsFetching] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'open' | 'closed' | 'all'>('open');
   const [currentPage, setCurrentPage] = useState(1);
   const initialLoadRef = useRef(true);
   const requestIdRef = useRef(0);
@@ -112,7 +117,7 @@ export const EventList: React.FC = () => {
         setIsFetching(true);
       }
       try {
-        const data = await apiService.getEvents(currentPage, 6, debouncedSearch);
+        const data = await apiService.getEvents(currentPage, 6, debouncedSearch, statusFilter);
         if (requestId !== requestIdRef.current) return;
         setEvents(data.events || []);
         setPagination(data.pagination || { page: 1, limit: 6, total: 0, totalPages: 1 });
@@ -127,7 +132,7 @@ export const EventList: React.FC = () => {
       }
     };
     fetchData();
-  }, [currentPage, debouncedSearch]);
+  }, [currentPage, debouncedSearch, statusFilter]);
 
   const handlePageChange = (page: number) => {
     setCurrentPage(page);
@@ -136,7 +141,7 @@ export const EventList: React.FC = () => {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [debouncedSearch]);
+  }, [debouncedSearch, statusFilter]);
 
   const totalPages = Math.max(1, pagination.totalPages || 1);
   const paginatedEvents = useMemo(() => events, [events]);
@@ -183,6 +188,24 @@ export const EventList: React.FC = () => {
         </div>
       </div>
 
+      {/* Registration Status Filter */}
+      <div className="flex items-center gap-2 mb-8">
+        <div className="flex items-center gap-1 p-1 bg-[#F2F2F2] rounded-full border border-[#2E2E2F]/10">
+          {(['open', 'closed', 'all'] as const).map((option) => (
+            <button
+              key={option}
+              onClick={() => setStatusFilter(option)}
+              className={`min-h-[32px] px-4 rounded-full text-[11px] font-semibold uppercase tracking-wide transition-colors focus:outline-none focus:ring-2 focus:ring-[#38BDF2] focus:ring-offset-2 ${statusFilter === option
+                ? 'bg-[#38BDF2] text-[#F2F2F2]'
+                : 'text-[#2E2E2F] hover:bg-[#2E2E2F] hover:text-[#F2F2F2]'
+                }`}
+            >
+              {option === 'all' ? 'All' : option === 'open' ? 'Open' : 'Closed'}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Grid Display */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 lg:gap-10">
         {paginatedEvents.map((event, idx) => (
@@ -222,7 +245,7 @@ export const EventList: React.FC = () => {
           <Button
             variant="outline"
             className="px-4"
-            onClick={() => setSearchTerm('')}
+            onClick={() => { setSearchTerm(''); setStatusFilter('all'); }}
           >
             Clear Filters
           </Button>

@@ -17,6 +17,12 @@ import ticketRoutes from "./routes/ticketRoutes.js";
 import ticketTypeRoutes from "./routes/ticketTypeRoutes.js";
 import orderRoutes from "./routes/orderRoutes.js";
 import cronRoutes from "./routes/cronRoutes.js";
+import footerRoutes from "./routes/footerRoutes.js";
+import adminFooterRoutes from "./routes/adminFooterRoutes.js";
+import footerColumnRoutes from "./routes/footerColumnRoutes.js";
+import adminFooterColumnRoutes from "./routes/adminFooterColumnRoutes.js";
+import couponRoutes from "./routes/couponRoutes.js";
+import adminCouponRoutes from "./routes/adminCouponRoutes.js";
 
 dotenv.config();
 const app = express();
@@ -101,6 +107,12 @@ app.use("/api/invite", inviteRoutes);
 app.use("/api", analyticsRoutes);
 app.use("/api", userRoutes);
 app.use("/api/admin/events", authMiddleware, adminEventRoutes);
+app.use("/api/footer-links", footerRoutes);
+app.use("/api/admin/footer-links", authMiddleware, adminFooterRoutes);
+app.use("/api/footer-columns", footerColumnRoutes);
+app.use("/api/admin/footer-columns", authMiddleware, adminFooterColumnRoutes);
+app.use("/api/coupons", couponRoutes);
+app.use("/api/admin/coupons", authMiddleware, adminCouponRoutes);
 app.use("/api/cron", cronRoutes);
 
 export default app;

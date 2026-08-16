@@ -1,5 +1,5 @@
 
-import { Event, Order, OrderItem, Attendee, Ticket, TicketType, AnalyticsSummary, RegistrationView, TicketStatus, OrderStatus } from '../types';
+import { Event, Order, OrderItem, Attendee, Ticket, TicketType, AnalyticsSummary, RegistrationView, TicketStatus, OrderStatus, FooterLink, FooterLinkType, FooterColumn, SocialPlatform, Coupon, CouponDiscountType } from '../types';
 import { MOCK_EVENTS } from './mockData';
 // Local storage keys
 const STORAGE_EVENTS = 'ef_events';
@@ -48,14 +48,32 @@ export const apiService = {
   // --- Public APIs ---
 
   // GET /api/events
-  getEvents: async (page = 1, limit = 10, search = ''): Promise<{ events: Event[], pagination: any }> => {
+  getEvents: async (page = 1, limit = 10, search = '', eventStatus: 'all' | 'open' | 'closed' = 'all'): Promise<{ events: Event[], pagination: any }> => {
     const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
-    const res = await fetch(`${API_BASE}/api/events?status=PUBLISHED&page=${page}&limit=${limit}${searchParam}`, {
+    const res = await fetch(`${API_BASE}/api/events?status=PUBLISHED&page=${page}&limit=${limit}&eventStatus=${eventStatus}${searchParam}`, {
       headers: { 'Content-Type': 'application/json' }
     });
     if (!res.ok) throw new Error(`Failed to load events: ${res.status}`);
     const data = await res.json();
     return data;
+  },
+
+  // GET /api/footer-links
+  getFooterLinks: async (): Promise<FooterLink[]> => {
+    const res = await fetch(`${API_BASE}/api/footer-links`, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (!res.ok) throw new Error(`Failed to load footer links: ${res.status}`);
+    return await res.json();
+  },
+
+  // GET /api/footer-columns
+  getFooterColumns: async (): Promise<FooterColumn[]> => {
+    const res = await fetch(`${API_BASE}/api/footer-columns`, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (!res.ok) throw new Error(`Failed to load footer columns: ${res.status}`);
+    return await res.json();
   },
 
   // GET /api/events/:slug
@@ -67,6 +85,24 @@ export const apiService = {
     if (!res.ok) throw new Error(`Failed to load event: ${res.status}`);
     const data = await res.json();
     return data as Event;
+  },
+
+  // POST /api/coupons/validate
+  validateCoupon: async (eventId: string, code: string, subtotal: number): Promise<{
+    valid: boolean;
+    error?: string;
+    discountAmount?: number;
+    discountType?: 'FIXED' | 'PERCENT';
+    discountValue?: number;
+    code?: string;
+  }> => {
+    const res = await fetch(`${API_BASE}/api/coupons/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventId, code, subtotal })
+    });
+    const data = await res.json().catch(() => ({ valid: false, error: 'Failed to validate coupon' }));
+    return data;
   },
 
   // POST /api/orders (Creates Order -> OrderItems -> Attendees -> Tickets)
@@ -145,6 +181,7 @@ export const apiService = {
       attendeeEmail: data.attendeeEmail || '', // backend may need to populate this
       attendeePhone: data.attendeePhone || null,
       attendeeCompany: data.attendeeCompany || null,
+      attendeeResponses: data.attendeeResponses || null,
       ticketName: data.ticketName || '', // backend may need to populate this
       status: data.status,
       paymentStatus: data.paymentStatus || '', // backend may need to populate this
@@ -257,6 +294,17 @@ export const apiService = {
     return { ...data, ticketTypes: data?.ticketTypes || eventData.ticketTypes || [] } as Event;
   },
 
+  deleteEvent: async (id: string): Promise<void> => {
+    const res = await fetch(`${API_BASE}/api/admin/events/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'include'
+    });
+    if (!res.ok && res.status !== 204) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to delete event: ${res.status}`);
+    }
+  },
+
   uploadEventImage: async (file: File, eventId?: string): Promise<{ publicUrl: string }> => {
     const formData = new FormData();
     formData.append('image', file);
@@ -276,8 +324,9 @@ export const apiService = {
     return { publicUrl: data.publicUrl };
   },
 
-  getAnalytics: async (): Promise<AnalyticsSummary> => {
-    const res = await fetch(`${API_BASE}/api/analytics/summary`, {
+  getAnalytics: async (eventId?: string): Promise<AnalyticsSummary> => {
+    const eventParam = eventId ? `?eventId=${encodeURIComponent(eventId)}` : '';
+    const res = await fetch(`${API_BASE}/api/analytics/summary${eventParam}`, {
       credentials: 'include'
     });
     if (!res.ok) {
@@ -287,8 +336,9 @@ export const apiService = {
     return res.json();
   },
 
-  getRecentTransactions: async (page = 1, limit = 10) => {
-    const res = await fetch(`${API_BASE}/api/analytics/transactions?page=${page}&limit=${limit}`, {
+  getRecentTransactions: async (page = 1, limit = 10, eventId?: string) => {
+    const eventParam = eventId ? `&eventId=${encodeURIComponent(eventId)}` : '';
+    const res = await fetch(`${API_BASE}/api/analytics/transactions?page=${page}&limit=${limit}${eventParam}`, {
       credentials: 'include'
     });
     if (!res.ok) {
@@ -298,8 +348,9 @@ export const apiService = {
     return res.json();
   },
 
-  getRecentOrders: async (page = 1, limit = 10) => {
-    const res = await fetch(`${API_BASE}/api/analytics/orders?page=${page}&limit=${limit}`, {
+  getRecentOrders: async (page = 1, limit = 10, eventId?: string) => {
+    const eventParam = eventId ? `&eventId=${encodeURIComponent(eventId)}` : '';
+    const res = await fetch(`${API_BASE}/api/analytics/orders?page=${page}&limit=${limit}${eventParam}`, {
       credentials: 'include'
     });
     if (!res.ok) {
@@ -481,5 +532,171 @@ export const apiService = {
       throw new Error(data.error || `Failed to remove staff: ${res.status}`);
     }
     return res.json();
+  },
+
+  // GET /api/admin/footer-links
+  getAdminFooterLinks: async (): Promise<FooterLink[]> => {
+    const res = await fetch(`${API_BASE}/api/admin/footer-links`, { credentials: 'include' });
+    if (!res.ok) throw new Error(`Failed to load footer links: ${res.status}`);
+    return await res.json();
+  },
+
+  // POST /api/admin/footer-links
+  createFooterLink: async (payload: { type: FooterLinkType; label?: string; platform?: SocialPlatform; columnId?: string; url: string }): Promise<FooterLink> => {
+    const res = await fetch(`${API_BASE}/api/admin/footer-links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to create footer link: ${res.status}`);
+    }
+    return await res.json();
+  },
+
+  // PUT /api/admin/footer-links/:id
+  updateFooterLink: async (id: string, payload: { type: FooterLinkType; label?: string; platform?: SocialPlatform; columnId?: string; url: string }): Promise<FooterLink> => {
+    const res = await fetch(`${API_BASE}/api/admin/footer-links/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to update footer link: ${res.status}`);
+    }
+    return await res.json();
+  },
+
+  // DELETE /api/admin/footer-links/:id
+  deleteFooterLink: async (id: string): Promise<void> => {
+    const res = await fetch(`${API_BASE}/api/admin/footer-links/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to delete footer link: ${res.status}`);
+    }
+  },
+
+  // PUT /api/admin/footer-links/reorder
+  reorderFooterLinks: async (ids: string[]): Promise<void> => {
+    const res = await fetch(`${API_BASE}/api/admin/footer-links/reorder`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ ids })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to reorder footer links: ${res.status}`);
+    }
+  },
+
+  // GET /api/admin/footer-columns
+  getAdminFooterColumns: async (): Promise<FooterColumn[]> => {
+    const res = await fetch(`${API_BASE}/api/admin/footer-columns`, { credentials: 'include' });
+    if (!res.ok) throw new Error(`Failed to load footer columns: ${res.status}`);
+    return await res.json();
+  },
+
+  // POST /api/admin/footer-columns
+  createFooterColumn: async (title: string): Promise<FooterColumn> => {
+    const res = await fetch(`${API_BASE}/api/admin/footer-columns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ title })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to create footer column: ${res.status}`);
+    }
+    return await res.json();
+  },
+
+  // PUT /api/admin/footer-columns/:id
+  updateFooterColumn: async (id: string, title: string): Promise<FooterColumn> => {
+    const res = await fetch(`${API_BASE}/api/admin/footer-columns/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ title })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to update footer column: ${res.status}`);
+    }
+    return await res.json();
+  },
+
+  // DELETE /api/admin/footer-columns/:id
+  deleteFooterColumn: async (id: string): Promise<void> => {
+    const res = await fetch(`${API_BASE}/api/admin/footer-columns/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to delete footer column: ${res.status}`);
+    }
+  },
+
+  // GET /api/admin/coupons?eventId=...
+  getAdminCoupons: async (eventId: string): Promise<Coupon[]> => {
+    const res = await fetch(`${API_BASE}/api/admin/coupons?eventId=${encodeURIComponent(eventId)}`, {
+      credentials: 'include'
+    });
+    if (!res.ok) throw new Error(`Failed to load coupons: ${res.status}`);
+    return await res.json();
+  },
+
+  // POST /api/admin/coupons
+  createCoupon: async (payload: { eventId: string; code?: string; discountType: CouponDiscountType; discountValue: number; maxUses?: number; expiresAt?: string }): Promise<Coupon> => {
+    const res = await fetch(`${API_BASE}/api/admin/coupons`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to create coupon: ${res.status}`);
+    }
+    return await res.json();
+  },
+
+  // POST /api/admin/coupons/bulk
+  bulkCreateCoupons: async (payload: { eventId: string; count: number; discountType: CouponDiscountType; discountValue: number; maxUses?: number; expiresAt?: string }): Promise<Coupon[]> => {
+    const res = await fetch(`${API_BASE}/api/admin/coupons/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to generate coupons: ${res.status}`);
+    }
+    return await res.json();
+  },
+
+  // PATCH /api/admin/coupons/:id
+  updateCoupon: async (id: string, payload: Partial<{ status: 'ACTIVE' | 'DISABLED'; code: string; discountType: CouponDiscountType; discountValue: number; maxUses: number; expiresAt: string | null }>): Promise<Coupon> => {
+    const res = await fetch(`${API_BASE}/api/admin/coupons/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Failed to update coupon: ${res.status}`);
+    }
+    return await res.json();
   }
 };

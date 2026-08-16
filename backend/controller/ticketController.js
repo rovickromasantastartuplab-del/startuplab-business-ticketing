@@ -1,6 +1,23 @@
 import supabase from '../database/db.js';
 import { logAudit } from '../utils/auditLogger.js';
 
+// Phase 6: also match search terms against admin-configured custom field responses
+// (attendees.responses, jsonb), in addition to the existing name/email match. Attendees
+// with no responses (every attendee on an event without formFields configured) never
+// match here, so search behavior for legacy events is unchanged.
+async function findAttendeeIdsByResponsesSearch(search) {
+  const { data, error } = await supabase
+    .from('attendees')
+    .select('attendeeId, responses')
+    .not('responses', 'is', null);
+  if (error) return { ids: [], error };
+  const needle = search.toLowerCase();
+  const ids = (data || [])
+    .filter(a => JSON.stringify(a.responses).toLowerCase().includes(needle))
+    .map(a => a.attendeeId);
+  return { ids, error: null };
+}
+
 export const listTickets = async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -24,12 +41,16 @@ export const getRegistrationsByEvent = async (req, res) => {
     let attendeeFilterIds = null;
 
     if (search) {
-      const { data: attendees, error: attErr } = await supabase
-        .from('attendees')
-        .select('attendeeId')
-        .or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+      const [{ data: attendees, error: attErr }, respMatch] = await Promise.all([
+        supabase
+          .from('attendees')
+          .select('attendeeId')
+          .or(`name.ilike.%${search}%,email.ilike.%${search}%`),
+        findAttendeeIdsByResponsesSearch(search)
+      ]);
       if (attErr) return res.status(500).json({ error: attErr.message });
-      attendeeFilterIds = (attendees || []).map(a => a.attendeeId);
+      if (respMatch.error) return res.status(500).json({ error: respMatch.error.message });
+      attendeeFilterIds = [...new Set([...(attendees || []).map(a => a.attendeeId), ...respMatch.ids])];
       if (!attendeeFilterIds.length) return res.json([]);
     }
 
@@ -52,7 +73,7 @@ export const getRegistrationsByEvent = async (req, res) => {
 
     const [attResp, ordResp, ttResp, evResp] = await Promise.all([
       attendeeIds.length
-        ? supabase.from('attendees').select('attendeeId, name, email, phoneNumber, company').in('attendeeId', attendeeIds)
+        ? supabase.from('attendees').select('attendeeId, name, email, phoneNumber, company, responses').in('attendeeId', attendeeIds)
         : { data: [], error: null },
       orderIds.length
         ? supabase.from('orders').select('orderId, totalAmount, currency, status').in('orderId', orderIds)
@@ -87,6 +108,7 @@ export const getRegistrationsByEvent = async (req, res) => {
         attendeeEmail: attendee.email || '',
         attendeePhone: attendee.phoneNumber || null,
         attendeeCompany: attendee.company || null,
+        attendeeResponses: attendee.responses || null,
         ticketName: tt.name || '',
         status: t.status,
         paymentStatus: order.status || '',
@@ -115,12 +137,16 @@ export const getAllRegistrations = async (req, res) => {
     let attendeeFilterIds = null;
 
     if (search) {
-      const { data: attendees, error: attErr } = await supabase
-        .from('attendees')
-        .select('attendeeId')
-        .or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+      const [{ data: attendees, error: attErr }, respMatch] = await Promise.all([
+        supabase
+          .from('attendees')
+          .select('attendeeId')
+          .or(`name.ilike.%${search}%,email.ilike.%${search}%`),
+        findAttendeeIdsByResponsesSearch(search)
+      ]);
       if (attErr) return res.status(500).json({ error: attErr.message });
-      attendeeFilterIds = (attendees || []).map(a => a.attendeeId);
+      if (respMatch.error) return res.status(500).json({ error: respMatch.error.message });
+      attendeeFilterIds = [...new Set([...(attendees || []).map(a => a.attendeeId), ...respMatch.ids])];
       if (!attendeeFilterIds.length) {
         return res.json({
           registrations: [],
@@ -180,7 +206,7 @@ export const getAllRegistrations = async (req, res) => {
 
     const [attResp, ordResp, ttResp, evResp] = await Promise.all([
       attendeeIds.length
-        ? supabase.from('attendees').select('attendeeId, name, email, phoneNumber, company').in('attendeeId', attendeeIds)
+        ? supabase.from('attendees').select('attendeeId, name, email, phoneNumber, company, responses').in('attendeeId', attendeeIds)
         : { data: [], error: null },
       orderIds.length
         ? supabase.from('orders').select('orderId, totalAmount, currency, status').in('orderId', orderIds)
@@ -218,6 +244,7 @@ export const getAllRegistrations = async (req, res) => {
         attendeeEmail: attendee.email || '',
         attendeePhone: attendee.phoneNumber || null,
         attendeeCompany: attendee.company || null,
+        attendeeResponses: attendee.responses || null,
         ticketName: tt.name || '',
         status: t.status,
         paymentStatus: order.status || '',
@@ -362,7 +389,7 @@ export const getTicketById = async (req, res) => {
 
     const [attResp, ordResp, ttResp, evResp] = await Promise.all([
       ticket.attendeeId
-        ? supabase.from('attendees').select('attendeeId, name, email, phoneNumber, company').eq('attendeeId', ticket.attendeeId).maybeSingle()
+        ? supabase.from('attendees').select('attendeeId, name, email, phoneNumber, company, responses').eq('attendeeId', ticket.attendeeId).maybeSingle()
         : { data: null, error: null },
       ticket.orderId
         ? supabase.from('orders').select('orderId, totalAmount, currency, status').eq('orderId', ticket.orderId).maybeSingle()
@@ -392,6 +419,7 @@ export const getTicketById = async (req, res) => {
       attendeeEmail: attResp.data?.email || '',
       attendeePhone: attResp.data?.phoneNumber || null,
       attendeeCompany: attResp.data?.company || null,
+      attendeeResponses: attResp.data?.responses || null,
       ticketName: ttResp.data?.name || '',
       paymentStatus: ordResp.data?.status || '',
       amountPaid: ordResp.data?.totalAmount || 0,

@@ -2,10 +2,11 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../../services/apiService';
-import { Event, UserRole, TicketType, RegistrationView, EventStatus, Ticket } from '../../types';
+import { Event, UserRole, TicketType, RegistrationView, EventStatus, Ticket, FormFieldConfig, FormFieldType, RESERVED_FIELD_KEYS, Coupon, CouponDiscountType } from '../../types';
 import { Card, Badge, Button, Modal, Input, PageLoader } from '../../components/Shared';
 import { ICONS } from '../../constants';
 import { useUser } from '../../context/UserContext';
+import QRCode from 'react-qr-code';
 
 // Helper to handle JSONB image format
 const getImageUrl = (img: any): string => {
@@ -13,6 +14,26 @@ const getImageUrl = (img: any): string => {
   if (typeof img === 'string') return img;
   return img.url || img.path || img.publicUrl || 'https://via.placeholder.com/800x400';
 };
+
+const FORM_FIELD_TYPES: { value: FormFieldType; label: string }[] = [
+  { value: 'text', label: 'Text' },
+  { value: 'email', label: 'Email' },
+  { value: 'phone', label: 'Phone' },
+  { value: 'select', label: 'Dropdown' },
+  { value: 'checkbox', label: 'Checkbox' },
+];
+
+const slugifyFieldKey = (label: string) => label
+  .toString()
+  .trim()
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, '_')
+  .replace(/^_+|_+$/g, '');
+
+// Turns a stored responses key (e.g. "dietary_restrictions") into a readable label.
+const humanizeFieldKey = (key: string) => key
+  .replace(/_/g, ' ')
+  .replace(/\b\w/g, c => c.toUpperCase());
 
 export const EventsManagement: React.FC = () => {
   const [events, setEvents] = useState<Event[]>([]);
@@ -22,6 +43,7 @@ export const EventsManagement: React.FC = () => {
   const [isTicketModalOpen, setIsTicketModalOpen] = useState(false);
   const [isTicketCreateModalOpen, setIsTicketCreateModalOpen] = useState(false);
   const [isAttendeeModalOpen, setIsAttendeeModalOpen] = useState(false);
+  const [isCouponModalOpen, setIsCouponModalOpen] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [attendees, setAttendees] = useState<RegistrationView[]>([]);
   const [isEditMode, setIsEditMode] = useState(false);
@@ -31,6 +53,15 @@ export const EventsManagement: React.FC = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<Event | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [qrEvent, setQrEvent] = useState<Event | null>(null);
+  const [qrCopied, setQrCopied] = useState(false);
+  const [newFieldLabel, setNewFieldLabel] = useState('');
+  const [newFieldType, setNewFieldType] = useState<FormFieldType>('text');
+  const [newFieldRequired, setNewFieldRequired] = useState(true);
+  const [newFieldOptions, setNewFieldOptions] = useState('');
+  const [formFieldError, setFormFieldError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initialLoadRef = useRef(true);
   const requestIdRef = useRef(0);
@@ -57,7 +88,8 @@ export const EventsManagement: React.FC = () => {
     regCloseDate: '',
     regCloseTime: '',
     streamingPlatform: '',
-    ticketTypes: [] as TicketType[]
+    ticketTypes: [] as TicketType[],
+    formFields: [] as FormFieldConfig[]
   };
 
   const [formData, setFormData] = useState(initialFormData);
@@ -110,6 +142,7 @@ export const EventsManagement: React.FC = () => {
     setCurrentEventId(null);
     setIsEditMode(false);
     setIsModalOpen(true);
+    resetNewFieldForm();
   };
 
   useEffect(() => {
@@ -178,16 +211,176 @@ export const EventsManagement: React.FC = () => {
       regCloseDate: closeDT.date,
       regCloseTime: closeDT.time,
       streamingPlatform: event.streamingPlatform || '',
-      ticketTypes: event.ticketTypes
+      ticketTypes: event.ticketTypes,
+      formFields: Array.isArray(event.formFields) ? event.formFields : []
     });
     setCurrentEventId(event.eventId);
     setIsEditMode(true);
     setIsModalOpen(true);
+    resetNewFieldForm();
+  };
+
+  const resetNewFieldForm = () => {
+    setNewFieldLabel('');
+    setNewFieldType('text');
+    setNewFieldRequired(true);
+    setNewFieldOptions('');
+    setFormFieldError('');
+  };
+
+  const handleAddFormField = () => {
+    setFormFieldError('');
+    const label = newFieldLabel.trim();
+    if (!label) {
+      setFormFieldError('Field label is required.');
+      return;
+    }
+    const baseKey = slugifyFieldKey(label);
+    if (!baseKey) {
+      setFormFieldError('Field label must contain at least one letter or number.');
+      return;
+    }
+    if (RESERVED_FIELD_KEYS.includes(baseKey)) {
+      setFormFieldError(`"${label}" collides with a fixed field (name, email, phone, company). Choose a different label.`);
+      return;
+    }
+    const existingKeys = new Set(formData.formFields.map(f => f.key));
+    let key = baseKey;
+    let suffix = 2;
+    while (existingKeys.has(key)) {
+      key = `${baseKey}_${suffix}`;
+      suffix += 1;
+    }
+
+    const newField: FormFieldConfig = {
+      key,
+      label,
+      type: newFieldType,
+      required: newFieldRequired,
+      ...(newFieldType === 'select'
+        ? { options: newFieldOptions.split(',').map(o => o.trim()).filter(Boolean) }
+        : {})
+    };
+
+    setFormData({ ...formData, formFields: [...formData.formFields, newField] });
+    resetNewFieldForm();
+  };
+
+  const handleRemoveFormField = (key: string) => {
+    setFormData({ ...formData, formFields: formData.formFields.filter(f => f.key !== key) });
+  };
+
+  // Phase 6 (optional): one-click, per-event, opt-in addition of the legacy Company field
+  // onto the new config system. (Contact Number is now a permanent fixed field alongside
+  // Name/Email — see RESERVED_FIELD_KEYS — so it's no longer offered here.) Only ever
+  // affects this event's local form state — nothing persists until Save is clicked, and it
+  // never runs automatically.
+  const handleAdoptLegacyFields = () => {
+    const legacyDefs: { label: string; type: FormFieldType; required: boolean }[] = [
+      { label: 'Company', type: 'text', required: false },
+    ];
+    const existingLabels = new Set(formData.formFields.map(f => f.label.toLowerCase()));
+    let next = [...formData.formFields];
+    for (const def of legacyDefs) {
+      if (existingLabels.has(def.label.toLowerCase())) continue;
+      const baseKey = slugifyFieldKey(def.label);
+      const existingKeys = new Set(next.map(f => f.key));
+      let key = baseKey;
+      let suffix = 2;
+      while (existingKeys.has(key) || RESERVED_FIELD_KEYS.includes(key)) {
+        key = `${baseKey}_${suffix}`;
+        suffix += 1;
+      }
+      next = [...next, { key, label: def.label, type: def.type, required: def.required }];
+    }
+    setFormData({ ...formData, formFields: next });
+  };
+
+  const handleUpdateFormField = (key: string, updates: Partial<FormFieldConfig>) => {
+    setFormData({
+      ...formData,
+      formFields: formData.formFields.map(f => f.key === key ? { ...f, ...updates } : f)
+    });
+  };
+
+  const handleMoveFormField = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= formData.formFields.length) return;
+    const next = [...formData.formFields];
+    [next[index], next[target]] = [next[target], next[index]];
+    setFormData({ ...formData, formFields: next });
   };
 
   const handleOpenTickets = (event: Event) => {
     setSelectedEvent(event);
     setIsTicketModalOpen(true);
+  };
+
+  const handleOpenCoupons = (event: Event) => {
+    setSelectedEvent(event);
+    setIsCouponModalOpen(true);
+  };
+
+  const getEventPublicUrl = (event: Event) => `${window.location.origin}/#/events/${event.slug}`;
+
+  const handleOpenQr = (event: Event) => {
+    setQrCopied(false);
+    setQrEvent(event);
+  };
+
+  const handleCopyQrLink = async () => {
+    if (!qrEvent) return;
+    try {
+      await navigator.clipboard.writeText(getEventPublicUrl(qrEvent));
+      setQrCopied(true);
+      setTimeout(() => setQrCopied(false), 2000);
+    } catch {
+      setNotification({ message: 'Failed to copy link.', type: 'error' });
+    }
+  };
+
+  const handleDownloadQr = () => {
+    if (!qrEvent) return;
+    const svg = document.getElementById('event-qr-code-svg');
+    if (!svg) return;
+    const svgData = new XMLSerializer().serializeToString(svg);
+    const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(svgBlob);
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const padding = 32;
+      canvas.width = img.width + padding * 2;
+      canvas.height = img.height + padding * 2;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = '#F2F2F2';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, padding, padding);
+      }
+      URL.revokeObjectURL(url);
+      const pngUrl = canvas.toDataURL('image/png');
+      const link = document.createElement('a');
+      link.href = pngUrl;
+      link.download = `${qrEvent.slug || 'event'}-qr.png`;
+      link.click();
+    };
+    img.src = url;
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleteLoading(true);
+    try {
+      await apiService.deleteEvent(deleteTarget.eventId);
+      setEvents(prev => prev.filter(e => e.eventId !== deleteTarget.eventId));
+      setDeleteTarget(null);
+      setNotification({ message: `"${deleteTarget.eventName}" was deleted.`, type: 'success' });
+    } catch (err: any) {
+      setNotification({ message: err.message || 'Failed to delete event.', type: 'error' });
+    } finally {
+      setDeleteLoading(false);
+    }
   };
 
 
@@ -242,7 +435,8 @@ export const EventsManagement: React.FC = () => {
         status: formData.status,
         regOpenAt: formData.regOpenDate || null,
         regCloseAt: formData.regCloseDate || null,
-        streamingPlatform: formData.streamingPlatform
+        streamingPlatform: formData.streamingPlatform,
+        formFields: formData.formFields
       };
 
       if (isEditMode && currentEventId) {
@@ -409,6 +603,22 @@ export const EventsManagement: React.FC = () => {
                         <ICONS.Users className="w-[1.2rem] h-[1.2rem]" strokeWidth={2.2} />
                       </button>
                       <button
+                        onClick={() => handleOpenCoupons(event)}
+                        className="text-[#2E2E2F] hover:text-[#2E2E2F] transition-colors p-1"
+                        title="Manage Coupons"
+                        disabled={isStaff && !canEditEvents}
+                        style={isStaff && !canEditEvents ? { opacity: 0.5, pointerEvents: 'none' } : {}}
+                      >
+                        <svg className="w-[1.2rem] h-[1.2rem]" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M20.59 13.41 11 22.99a2 2 0 01-2.83 0l-8.16-8.16a2 2 0 010-2.83L9.6 1.42A2 2 0 0111 .83h9a2 2 0 012 2v9a2 2 0 01-.41 1.58z" /><circle cx="16.5" cy="6.5" r="1.5" /></svg>
+                      </button>
+                      <button
+                        onClick={() => handleOpenQr(event)}
+                        className="text-[#2E2E2F] hover:text-[#2E2E2F] transition-colors p-1"
+                        title="Generate Registration QR"
+                      >
+                        <svg className="w-[1.2rem] h-[1.2rem]" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><path strokeLinecap="round" d="M14 14h3m4 0h0M14 21h0m3-4h4m-4 4h4v-4" /></svg>
+                      </button>
+                      <button
                         onClick={() => handleOpenEdit(event)}
                         className="text-[#2E2E2F] hover:text-[#2E2E2F] transition-colors p-1"
                         title="Edit Session"
@@ -416,6 +626,15 @@ export const EventsManagement: React.FC = () => {
                         style={isStaff && !canEditEvents ? { opacity: 0.5, pointerEvents: 'none' } : {}}
                       >
                         <svg className="w-[1.2rem] h-[1.2rem]" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                      </button>
+                      <button
+                        onClick={() => setDeleteTarget(event)}
+                        className="text-[#2E2E2F] hover:text-[#2E2E2F] transition-colors p-1"
+                        title="Delete Event"
+                        disabled={isStaff}
+                        style={isStaff ? { opacity: 0.5, pointerEvents: 'none' } : {}}
+                      >
+                        <svg className="w-[1.2rem] h-[1.2rem]" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 7h12M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2m3 0-1 13a2 2 0 01-2 2H8a2 2 0 01-2-2L5 7m3 4v6m4-6v6" /></svg>
                       </button>
                     </div>
                   </td>
@@ -623,6 +842,116 @@ export const EventsManagement: React.FC = () => {
               )}
             </div>
 
+            <div className="pt-8 border-t border-[#2E2E2F]/20 space-y-5">
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div>
+                  <label className="block text-[10px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.2em] mb-1">Registration Form Fields</label>
+                  <p className="text-[11px] text-[#2E2E2F]/50 font-medium">
+                    Full Name, Email, and Contact Number are always collected. Add extra fields guests will see on the registration page.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAdoptLegacyFields}
+                  className="min-h-[32px] px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#F2F2F2] border border-[#2E2E2F]/20 text-[#2E2E2F] hover:bg-[#38BDF2] hover:text-[#F2F2F2] transition-colors whitespace-nowrap"
+                  title="Adds Company as a configurable field, mirroring the old fixed form"
+                >
+                  Add Legacy Company Field
+                </button>
+              </div>
+
+              {formData.formFields.length > 0 && (
+                <div className="space-y-2">
+                  {formData.formFields.map((field, index) => (
+                    <div key={field.key} className="flex flex-wrap items-center gap-3 p-3 bg-[#F2F2F2] border border-[#2E2E2F]/15 rounded-xl">
+                      <div className="flex flex-col gap-1">
+                        <button type="button" onClick={() => handleMoveFormField(index, -1)} disabled={index === 0} className="text-[#2E2E2F]/50 hover:text-[#2E2E2F] disabled:opacity-20 disabled:hover:text-[#2E2E2F]/50 leading-none">
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" /></svg>
+                        </button>
+                        <button type="button" onClick={() => handleMoveFormField(index, 1)} disabled={index === formData.formFields.length - 1} className="text-[#2E2E2F]/50 hover:text-[#2E2E2F] disabled:opacity-20 disabled:hover:text-[#2E2E2F]/50 leading-none">
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                      </div>
+                      <input
+                        type="text"
+                        value={field.label}
+                        onChange={(e) => handleUpdateFormField(field.key, { label: e.target.value })}
+                        className="flex-1 min-w-[140px] px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm"
+                      />
+                      <span className="px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-widest bg-[#2E2E2F]/10 text-[#2E2E2F]/70">
+                        {FORM_FIELD_TYPES.find(t => t.value === field.type)?.label || field.type}
+                      </span>
+                      <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-[#2E2E2F]/70 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={field.required}
+                          onChange={(e) => handleUpdateFormField(field.key, { required: e.target.checked })}
+                        />
+                        Required
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveFormField(field.key)}
+                        className="ml-auto text-[#2E2E2F]/50 hover:text-[#2E2E2F] p-1"
+                        title="Remove field"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-end gap-3 p-4 bg-[#F2F2F2] border border-dashed border-[#2E2E2F]/25 rounded-xl">
+                <div className="flex-1 min-w-[160px]">
+                  <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">New Field Label</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Dietary Restrictions"
+                    value={newFieldLabel}
+                    onChange={(e) => setNewFieldLabel(e.target.value)}
+                    className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Type</label>
+                  <select
+                    value={newFieldType}
+                    onChange={(e) => setNewFieldType(e.target.value as FormFieldType)}
+                    className="px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm"
+                  >
+                    {FORM_FIELD_TYPES.map(t => (
+                      <option key={t.value} value={t.value}>{t.label}</option>
+                    ))}
+                  </select>
+                </div>
+                {newFieldType === 'select' && (
+                  <div className="flex-1 min-w-[160px]">
+                    <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Options (comma separated)</label>
+                    <input
+                      type="text"
+                      placeholder="Vegetarian, Vegan, None"
+                      value={newFieldOptions}
+                      onChange={(e) => setNewFieldOptions(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm"
+                    />
+                  </div>
+                )}
+                <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-[#2E2E2F]/70 cursor-pointer select-none pb-2.5">
+                  <input
+                    type="checkbox"
+                    checked={newFieldRequired}
+                    onChange={(e) => setNewFieldRequired(e.target.checked)}
+                  />
+                  Required
+                </label>
+                <Button type="button" onClick={handleAddFormField} className="px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#38BDF2] text-[#F2F2F2] hover:bg-[#2E2E2F] hover:text-[#F2F2F2] transition-colors min-h-[32px]">
+                  Add Field
+                </Button>
+              </div>
+              {formFieldError && <p className="text-[11px] font-bold text-[#2E2E2F]">{formFieldError}</p>}
+            </div>
+
             <div className="flex gap-4 pt-8 border-t border-[#2E2E2F]/20">
               <Button className="flex-1 py-2 px-4 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#38BDF2] text-[#F2F2F2] hover:bg-[#2E2E2F] hover:text-[#F2F2F2] transition-colors min-h-[32px]" onClick={() => setIsModalOpen(false)}>Cancel</Button>
               <Button type="submit" className="flex-[2] py-2 px-4 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#38BDF2] text-[#F2F2F2] hover:bg-[#2E2E2F] hover:text-[#F2F2F2] transition-colors min-h-[32px]" disabled={submitting}>
@@ -646,6 +975,17 @@ export const EventsManagement: React.FC = () => {
           submitting={submitting}
           setNotification={setNotification}
         />
+      </Modal>
+
+      {/* Coupon Management Pop-up */}
+      <Modal
+        isOpen={isCouponModalOpen}
+        onClose={() => setIsCouponModalOpen(false)}
+        title="Coupons"
+        subtitle={selectedEvent?.eventName}
+        size="lg"
+      >
+        <CouponManager event={selectedEvent} setNotification={setNotification} />
       </Modal>
 
 
@@ -672,6 +1012,11 @@ export const EventsManagement: React.FC = () => {
                     <div>
                       <p className="font-semibold text-[#2E2E2F] text-[15px] tracking-tight">{reg.attendeeName}</p>
                       <p className="text-[12px] text-[#2E2E2F]/60 font-medium uppercase tracking-tight mt-0.5">{reg.attendeeEmail}</p>
+                      {reg.attendeeResponses && Object.keys(reg.attendeeResponses).length > 0 && (
+                        <p className="text-[10px] text-[#2E2E2F]/50 font-medium mt-1 truncate max-w-xs">
+                          {Object.entries(reg.attendeeResponses).map(([key, value]) => `${humanizeFieldKey(key)}: ${typeof value === 'boolean' ? (value ? 'Yes' : 'No') : value}`).join(' · ')}
+                        </p>
+                      )}
                     </div>
                   </div>
                   <div className="text-right">
@@ -699,6 +1044,63 @@ export const EventsManagement: React.FC = () => {
             </Button>
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        isOpen={!!deleteTarget}
+        onClose={() => !deleteLoading && setDeleteTarget(null)}
+        title="Delete Event"
+        size="lg"
+      >
+        <div className="space-y-6 px-2">
+          <p className="text-[#2E2E2F]/80 font-medium text-sm leading-relaxed">
+            Permanently delete <span className="font-black">{deleteTarget?.eventName}</span>? This also deletes its ticket types, issued tickets, and attendee records. This cannot be undone.
+          </p>
+          <div className="pt-4 flex flex-col sm:flex-row gap-4">
+            <Button type="button" className="flex-1" onClick={() => setDeleteTarget(null)} disabled={deleteLoading}>
+              Cancel
+            </Button>
+            <Button type="button" className="flex-[2]" onClick={handleConfirmDelete} disabled={deleteLoading}>
+              {deleteLoading ? 'Deleting...' : 'Delete event'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={!!qrEvent}
+        onClose={() => setQrEvent(null)}
+        title="Registration QR Code"
+        subtitle={qrEvent?.eventName}
+        size="lg"
+      >
+        {qrEvent && (
+          <div className="space-y-6 px-2 flex flex-col items-center">
+            <div className="p-6 bg-[#F2F2F2] border border-[#2E2E2F]/10 rounded-2xl">
+              <QRCode
+                id="event-qr-code-svg"
+                value={getEventPublicUrl(qrEvent)}
+                size={220}
+                fgColor="#2E2E2F"
+                bgColor="#F2F2F2"
+              />
+            </div>
+            <p className="text-[#2E2E2F]/70 font-medium text-[13px] text-center leading-relaxed">
+              Scanning this code opens the event page where guests can register directly.
+            </p>
+            <div className="w-full px-4 py-3 rounded-xl bg-[#F2F2F2] border border-[#2E2E2F]/10 text-[12px] font-bold text-[#2E2E2F]/70 break-all text-center">
+              {getEventPublicUrl(qrEvent)}
+            </div>
+            <div className="w-full flex flex-col sm:flex-row gap-4">
+              <Button type="button" className="flex-1" onClick={handleCopyQrLink}>
+                {qrCopied ? 'Copied!' : 'Copy Link'}
+              </Button>
+              <Button type="button" className="flex-1" onClick={handleDownloadQr}>
+                Download QR
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );
@@ -1047,6 +1449,419 @@ const TicketManager: React.FC<TicketManagerProps> = ({ event, onSave, submitting
       >
         {submitting ? 'Updating...' : 'Commit Inventory Changes'}
       </Button>
+    </div>
+  );
+};
+
+interface CouponManagerProps {
+  event: Event | null;
+  setNotification: (n: { message: string; type: 'success' | 'error' }) => void;
+}
+
+const CouponManager: React.FC<CouponManagerProps> = ({ event, setNotification }) => {
+  const [coupons, setCoupons] = useState<Coupon[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const [code, setCode] = useState('');
+  const [discountType, setDiscountType] = useState<CouponDiscountType>('FIXED');
+  const [discountValue, setDiscountValue] = useState('');
+  const [maxUses, setMaxUses] = useState('1');
+  const [expiresAt, setExpiresAt] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState('');
+
+  const [bulkCount, setBulkCount] = useState('10');
+  const [bulkDiscountType, setBulkDiscountType] = useState<CouponDiscountType>('FIXED');
+  const [bulkDiscountValue, setBulkDiscountValue] = useState('');
+  const [bulkMaxUses, setBulkMaxUses] = useState('1');
+  const [bulkExpiresAt, setBulkExpiresAt] = useState('');
+  const [bulkGenerating, setBulkGenerating] = useState(false);
+  const [bulkError, setBulkError] = useState('');
+  const [generatedBatch, setGeneratedBatch] = useState<Coupon[] | null>(null);
+  const [expandedCouponId, setExpandedCouponId] = useState<string | null>(null);
+
+  const [editingCouponId, setEditingCouponId] = useState<string | null>(null);
+  const [editCode, setEditCode] = useState('');
+  const [editDiscountType, setEditDiscountType] = useState<CouponDiscountType>('FIXED');
+  const [editDiscountValue, setEditDiscountValue] = useState('');
+  const [editMaxUses, setEditMaxUses] = useState('1');
+  const [editExpiresAt, setEditExpiresAt] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState('');
+
+  useEffect(() => {
+    if (!event) {
+      setCoupons([]);
+      return;
+    }
+    setLoading(true);
+    apiService.getAdminCoupons(event.eventId)
+      .then(setCoupons)
+      .catch(() => setCoupons([]))
+      .finally(() => setLoading(false));
+    setGeneratedBatch(null);
+  }, [event?.eventId]);
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!event) return;
+    setCreateError('');
+    const value = Number(discountValue);
+    if (!Number.isFinite(value) || value <= 0) {
+      setCreateError('Enter a valid discount value.');
+      return;
+    }
+    const maxUsesValue = Number(maxUses);
+    if (!Number.isInteger(maxUsesValue) || maxUsesValue <= 0) {
+      setCreateError('Max uses must be a positive whole number.');
+      return;
+    }
+    setCreating(true);
+    try {
+      const created = await apiService.createCoupon({
+        eventId: event.eventId,
+        code: code.trim() || undefined,
+        discountType,
+        discountValue: value,
+        maxUses: maxUsesValue,
+        expiresAt: expiresAt || undefined
+      });
+      setCoupons(prev => [created, ...prev]);
+      setCode('');
+      setDiscountValue('');
+      setMaxUses('1');
+      setExpiresAt('');
+      setNotification({ message: `Coupon ${created.code} created.`, type: 'success' });
+    } catch (err: any) {
+      setCreateError(err.message || 'Failed to create coupon.');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleBulkGenerate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!event) return;
+    setBulkError('');
+    const count = Number(bulkCount);
+    const value = Number(bulkDiscountValue);
+    if (!Number.isInteger(count) || count <= 0 || count > 500) {
+      setBulkError('Count must be a whole number between 1 and 500.');
+      return;
+    }
+    if (!Number.isFinite(value) || value <= 0) {
+      setBulkError('Enter a valid discount value.');
+      return;
+    }
+    const maxUsesValue = Number(bulkMaxUses);
+    if (!Number.isInteger(maxUsesValue) || maxUsesValue <= 0) {
+      setBulkError('Max uses must be a positive whole number.');
+      return;
+    }
+    setBulkGenerating(true);
+    try {
+      const created = await apiService.bulkCreateCoupons({
+        eventId: event.eventId,
+        count,
+        discountType: bulkDiscountType,
+        discountValue: value,
+        maxUses: maxUsesValue,
+        expiresAt: bulkExpiresAt || undefined
+      });
+      setCoupons(prev => [...created, ...prev]);
+      setGeneratedBatch(created);
+      setNotification({ message: `${created.length} coupons generated.`, type: 'success' });
+    } catch (err: any) {
+      setBulkError(err.message || 'Failed to generate coupons.');
+    } finally {
+      setBulkGenerating(false);
+    }
+  };
+
+  const handleToggleStatus = async (coupon: Coupon) => {
+    const nextStatus = coupon.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE';
+    try {
+      const updated = await apiService.updateCoupon(coupon.couponId, { status: nextStatus });
+      setCoupons(prev => prev.map(c => c.couponId === updated.couponId ? updated : c));
+    } catch (err: any) {
+      setNotification({ message: err.message || 'Failed to update coupon.', type: 'error' });
+    }
+  };
+
+  const handleStartEdit = (coupon: Coupon) => {
+    setExpandedCouponId(null);
+    setEditingCouponId(coupon.couponId);
+    setEditCode(coupon.code);
+    setEditDiscountType(coupon.discountType);
+    setEditDiscountValue(String(coupon.discountValue));
+    setEditMaxUses(String(coupon.maxUses || 1));
+    setEditExpiresAt(coupon.expiresAt ? coupon.expiresAt.slice(0, 10) : '');
+    setEditError('');
+  };
+
+  const handleCancelEdit = () => {
+    setEditingCouponId(null);
+    setEditError('');
+  };
+
+  const handleSaveEdit = async (coupon: Coupon) => {
+    setEditError('');
+    const value = Number(editDiscountValue);
+    if (!Number.isFinite(value) || value <= 0) {
+      setEditError('Enter a valid discount value.');
+      return;
+    }
+    const maxUsesValue = Number(editMaxUses);
+    if (!Number.isInteger(maxUsesValue) || maxUsesValue <= 0) {
+      setEditError('Max uses must be a positive whole number.');
+      return;
+    }
+    if (maxUsesValue < (coupon.usesCount || 0)) {
+      setEditError(`Max uses cannot be lower than the current uses count (${coupon.usesCount}).`);
+      return;
+    }
+    if (!editCode.trim()) {
+      setEditError('Code cannot be empty.');
+      return;
+    }
+    setEditSaving(true);
+    try {
+      const updated = await apiService.updateCoupon(coupon.couponId, {
+        code: editCode.trim(),
+        discountType: editDiscountType,
+        discountValue: value,
+        maxUses: maxUsesValue,
+        expiresAt: editExpiresAt || null
+      });
+      setCoupons(prev => prev.map(c => c.couponId === updated.couponId ? { ...updated, redemptions: c.redemptions } : c));
+      setEditingCouponId(null);
+      setNotification({ message: `Coupon ${updated.code} updated.`, type: 'success' });
+    } catch (err: any) {
+      setEditError(err.message || 'Failed to update coupon.');
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const copyBatch = async () => {
+    if (!generatedBatch) return;
+    try {
+      await navigator.clipboard.writeText(generatedBatch.map(c => c.code).join('\n'));
+      setNotification({ message: 'Codes copied to clipboard.', type: 'success' });
+    } catch {
+      setNotification({ message: 'Failed to copy codes.', type: 'error' });
+    }
+  };
+
+  const formatDiscount = (c: Coupon) => c.discountType === 'PERCENT' ? `${c.discountValue}% off` : `PHP ${c.discountValue} off`;
+
+  if (!event) return null;
+
+  return (
+    <div className="space-y-8 px-1">
+      <div className="space-y-3">
+        <h3 className="text-[11px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.3em]">Create Coupon</h3>
+        <form onSubmit={handleCreate} className="flex flex-wrap items-end gap-3 p-4 bg-[#F2F2F2] border border-[#2E2E2F]/15 rounded-xl">
+          <div className="flex-1 min-w-[140px]">
+            <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Code (optional)</label>
+            <input type="text" placeholder="Auto-generated if blank" value={code} onChange={(e) => setCode(e.target.value)} className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm uppercase" />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Type</label>
+            <select value={discountType} onChange={(e) => setDiscountType(e.target.value as CouponDiscountType)} className="px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm">
+              <option value="FIXED">Fixed (PHP)</option>
+              <option value="PERCENT">Percent (%)</option>
+            </select>
+          </div>
+          <div className="w-28">
+            <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Value</label>
+            <input type="number" min="0" step="0.01" value={discountValue} onChange={(e) => setDiscountValue(e.target.value)} className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm" />
+          </div>
+          <div className="w-24">
+            <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1" title="How many different people/orders can redeem this one code">Max Uses</label>
+            <input type="number" min="1" step="1" value={maxUses} onChange={(e) => setMaxUses(e.target.value)} className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm" />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Expires (optional)</label>
+            <input type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} className="px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm" />
+          </div>
+          <Button type="submit" disabled={creating} className="px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#38BDF2] text-[#F2F2F2] hover:bg-[#2E2E2F] hover:text-[#F2F2F2] transition-colors min-h-[32px]">
+            {creating ? 'Creating...' : 'Create'}
+          </Button>
+        </form>
+        {createError && <p className="text-[11px] font-semibold text-[#2E2E2F]">{createError}</p>}
+      </div>
+
+      <div className="space-y-3">
+        <h3 className="text-[11px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.3em]">Bulk Generate</h3>
+        <form onSubmit={handleBulkGenerate} className="flex flex-wrap items-end gap-3 p-4 bg-[#F2F2F2] border border-dashed border-[#2E2E2F]/25 rounded-xl">
+          <div className="w-24">
+            <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Count</label>
+            <input type="number" min="1" max="500" value={bulkCount} onChange={(e) => setBulkCount(e.target.value)} className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm" />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Type</label>
+            <select value={bulkDiscountType} onChange={(e) => setBulkDiscountType(e.target.value as CouponDiscountType)} className="px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm">
+              <option value="FIXED">Fixed (PHP)</option>
+              <option value="PERCENT">Percent (%)</option>
+            </select>
+          </div>
+          <div className="w-28">
+            <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Value</label>
+            <input type="number" min="0" step="0.01" value={bulkDiscountValue} onChange={(e) => setBulkDiscountValue(e.target.value)} className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm" />
+          </div>
+          <div className="w-24">
+            <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1" title="How many different people/orders can redeem each generated code">Max Uses</label>
+            <input type="number" min="1" step="1" value={bulkMaxUses} onChange={(e) => setBulkMaxUses(e.target.value)} className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm" />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Expires (optional)</label>
+            <input type="date" value={bulkExpiresAt} onChange={(e) => setBulkExpiresAt(e.target.value)} className="px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm" />
+          </div>
+          <Button type="submit" disabled={bulkGenerating} className="px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest bg-[#38BDF2] text-[#F2F2F2] hover:bg-[#2E2E2F] hover:text-[#F2F2F2] transition-colors min-h-[32px]">
+            {bulkGenerating ? 'Generating...' : 'Generate Batch'}
+          </Button>
+        </form>
+        {bulkError && <p className="text-[11px] font-semibold text-[#2E2E2F]">{bulkError}</p>}
+
+        {generatedBatch && (
+          <div className="p-4 bg-[#38BDF2]/10 border border-[#38BDF2]/30 rounded-xl space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-[11px] font-black text-[#2E2E2F] uppercase tracking-wide">{generatedBatch.length} codes generated</p>
+              <div className="flex gap-2">
+                <button type="button" onClick={copyBatch} className="min-h-[28px] px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest bg-[#38BDF2] text-[#F2F2F2] hover:bg-[#2E2E2F] transition-colors">Copy All</button>
+                <button type="button" onClick={() => setGeneratedBatch(null)} className="min-h-[28px] px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest bg-[#F2F2F2] border border-[#2E2E2F]/20 text-[#2E2E2F] hover:bg-[#2E2E2F] hover:text-[#F2F2F2] transition-colors">Dismiss</button>
+              </div>
+            </div>
+            <div className="max-h-40 overflow-y-auto grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {generatedBatch.map(c => (
+                <span key={c.couponId} className="px-2.5 py-1.5 bg-white border border-[#2E2E2F]/15 rounded-lg text-[11px] font-mono font-bold text-[#2E2E2F] text-center">{c.code}</span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-3">
+        <h3 className="text-[11px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.3em]">All Coupons ({coupons.length})</h3>
+        {loading ? (
+          <p className="text-center py-8 text-[#2E2E2F]/50 text-xs font-bold uppercase tracking-widest">Loading...</p>
+        ) : coupons.length === 0 ? (
+          <p className="text-center py-8 text-[#2E2E2F]/50 text-xs font-bold uppercase tracking-widest">No coupons yet for this event.</p>
+        ) : (
+          <div className="max-h-96 overflow-y-auto space-y-2 pr-1">
+            {coupons.map((c) => {
+              const usesCount = c.usesCount || 0;
+              const maxUsesForCoupon = c.maxUses || 1;
+              const isExhausted = usesCount >= maxUsesForCoupon;
+              const redemptions = c.redemptions || [];
+              const isExpanded = expandedCouponId === c.couponId;
+              const isEditing = editingCouponId === c.couponId;
+
+              if (isEditing) {
+                return (
+                  <div key={c.couponId} className="bg-[#F2F2F2] border border-[#38BDF2]/40 rounded-xl p-3 space-y-3">
+                    <div className="flex flex-wrap items-end gap-3">
+                      <div className="flex-1 min-w-[120px]">
+                        <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Code</label>
+                        <input type="text" value={editCode} onChange={(e) => setEditCode(e.target.value)} className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm uppercase" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Type</label>
+                        <select value={editDiscountType} onChange={(e) => setEditDiscountType(e.target.value as CouponDiscountType)} className="px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm">
+                          <option value="FIXED">Fixed (PHP)</option>
+                          <option value="PERCENT">Percent (%)</option>
+                        </select>
+                      </div>
+                      <div className="w-24">
+                        <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Value</label>
+                        <input type="number" min="0" step="0.01" value={editDiscountValue} onChange={(e) => setEditDiscountValue(e.target.value)} className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm" />
+                      </div>
+                      <div className="w-24">
+                        <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Max Uses</label>
+                        <input type="number" min={usesCount || 1} step="1" value={editMaxUses} onChange={(e) => setEditMaxUses(e.target.value)} className="w-full px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-[#2E2E2F]/60 uppercase tracking-wide mb-1">Expires</label>
+                        <input type="date" value={editExpiresAt} onChange={(e) => setEditExpiresAt(e.target.value)} className="px-3 py-2 bg-white border border-[#2E2E2F]/20 rounded-lg text-sm" />
+                      </div>
+                    </div>
+                    {editError && <p className="text-[11px] font-semibold text-[#2E2E2F]">{editError}</p>}
+                    <div className="flex gap-2">
+                      <button type="button" onClick={() => handleSaveEdit(c)} disabled={editSaving} className="min-h-[28px] px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest bg-[#38BDF2] text-[#F2F2F2] hover:bg-[#2E2E2F] transition-colors disabled:opacity-50">
+                        {editSaving ? 'Saving...' : 'Save'}
+                      </button>
+                      <button type="button" onClick={handleCancelEdit} disabled={editSaving} className="min-h-[28px] px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest bg-[#F2F2F2] border border-[#2E2E2F]/20 text-[#2E2E2F] hover:bg-[#2E2E2F] hover:text-[#F2F2F2] transition-colors">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
+
+              return (
+                <div key={c.couponId} className="bg-[#F2F2F2] border border-[#2E2E2F]/15 rounded-xl overflow-hidden">
+                  <div className="flex items-center justify-between gap-4 p-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono font-black text-[#2E2E2F] text-[13px]">{c.code}</span>
+                        <span className={`px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest ${c.status === 'ACTIVE' ? 'bg-[#38BDF2]/20 text-[#2E2E2F]' : 'bg-[#2E2E2F]/10 text-[#2E2E2F]/40'
+                          }`}>{c.status}</span>
+                        <span className={`px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest ${isExhausted ? 'bg-[#2E2E2F]/10 text-[#2E2E2F]/60' : 'bg-[#2E2E2F]/5 text-[#2E2E2F]/60'
+                          }`}>{usesCount}/{maxUsesForCoupon} used</span>
+                      </div>
+                      <p className="text-[11px] text-[#2E2E2F]/60 font-medium mt-0.5">
+                        {formatDiscount(c)}
+                        {c.expiresAt && ` · expires ${new Date(c.expiresAt).toLocaleDateString()}`}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {redemptions.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setExpandedCouponId(isExpanded ? null : c.couponId)}
+                          className="min-h-[28px] px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest bg-[#F2F2F2] border border-[#2E2E2F]/20 text-[#2E2E2F] hover:bg-[#38BDF2] hover:text-[#F2F2F2] transition-colors"
+                        >
+                          {isExpanded ? 'Hide' : `Used by (${redemptions.length})`}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleStartEdit(c)}
+                        className="min-h-[28px] px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest bg-[#F2F2F2] border border-[#2E2E2F]/20 text-[#2E2E2F] hover:bg-[#38BDF2] hover:text-[#F2F2F2] transition-colors"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleStatus(c)}
+                        className="min-h-[28px] px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest bg-[#F2F2F2] border border-[#2E2E2F]/20 text-[#2E2E2F] hover:bg-[#38BDF2] hover:text-[#F2F2F2] transition-colors"
+                      >
+                        {c.status === 'ACTIVE' ? 'Disable' : 'Enable'}
+                      </button>
+                    </div>
+                  </div>
+                  {isExpanded && redemptions.length > 0 && (
+                    <div className="border-t border-[#2E2E2F]/10 divide-y divide-[#2E2E2F]/10">
+                      {redemptions.map((r) => (
+                        <div key={r.redemptionId} className="px-3 py-2.5 flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-[12px] font-bold text-[#2E2E2F] truncate">{r.buyerName || 'Unknown'}</p>
+                            <p className="text-[11px] text-[#2E2E2F]/60 truncate">{r.buyerEmail || '—'}</p>
+                          </div>
+                          <p className="text-[10px] text-[#2E2E2F]/50 font-medium uppercase tracking-wide shrink-0 text-right">
+                            {new Date(r.redeemedAt).toLocaleString()}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

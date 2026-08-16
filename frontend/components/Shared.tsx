@@ -81,17 +81,29 @@ export const Button: React.FC<{
 export const Input: React.FC<{
   label?: string;
   error?: string;
+  className?: string;
   [key: string]: any;
-}> = ({ label, error, ...props }) => (
-  <div className="space-y-1.5 w-full">
-    {label && <label className="block text-sm font-medium text-[#2E2E2F]/70">{label}</label>}
-    <input
-      className={`block w-full px-3 py-2 bg-[#F2F2F2] border ${error ? 'border-[#2E2E2F]' : 'border-[#2E2E2F]/20'} rounded-lg focus:outline-none focus:ring-2 ${error ? 'focus:ring-[#2E2E2F]/40' : 'focus:ring-[#38BDF2]/40'} transition-colors font-normal`}
-      {...props}
-    />
-    {error && <p className="text-xs text-[#2E2E2F] mt-1">{error}</p>}
-  </div>
-);
+}> = ({ label, error, className = '', ...props }) => {
+  // A caller-supplied className always fully specifies padding/background/border/rounded
+  // (every current usage that passes one does), so mixing it with this component's own
+  // decorative defaults would leave two conflicting Tailwind utilities (e.g. `rounded-lg`
+  // vs a caller's `rounded-[1rem]`) on the element with an unpredictable winner. Only apply
+  // the decorative defaults when there's no custom className to conflict with; a custom
+  // className still always gets `w-full` (previously silently dropped) plus a non-conflicting
+  // error ring (box-shadow, not `border`, so it can't collide with the caller's border color).
+  const hasCustomStyling = className.length > 0;
+  const base = hasCustomStyling
+    ? `block w-full transition-colors font-normal focus:outline-none ${error ? 'ring-2 ring-[#2E2E2F]/40' : ''}`
+    : `block w-full px-3 py-2 bg-[#F2F2F2] border ${error ? 'border-[#2E2E2F]' : 'border-[#2E2E2F]/20'} rounded-lg focus:outline-none focus:ring-2 ${error ? 'focus:ring-[#2E2E2F]/40' : 'focus:ring-[#38BDF2]/40'} transition-colors font-normal`;
+
+  return (
+    <div className="space-y-1.5 w-full">
+      {label && <label className="block text-sm font-medium text-[#2E2E2F]/70">{label}</label>}
+      <input className={`${base} ${className}`} {...props} />
+      {error && <p className="text-xs text-[#2E2E2F] mt-1">{error}</p>}
+    </div>
+  );
+};
 
 export const Modal: React.FC<{
   isOpen: boolean;

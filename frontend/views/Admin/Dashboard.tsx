@@ -2,10 +2,15 @@
 import React, { useEffect, useState } from 'react';
 import { HashRouter as Router, Routes, Route, Link, useLocation, useSearchParams, useNavigate, Navigate } from 'react-router-dom';
 import { apiService } from '../../services/apiService';
-import { AnalyticsSummary, UserRole } from '../../types';
+import { AnalyticsSummary, UserRole, Event } from '../../types';
 import { Badge, Card, Modal, PageLoader } from '../../components/Shared';
 import { ICONS } from '../../constants';
 import QRCode from 'react-qr-code';
+
+// Turns a stored responses key (e.g. "dietary_restrictions") into a readable label.
+const humanizeFieldKey = (key: string) => key
+  .replace(/_/g, ' ')
+  .replace(/\b\w/g, c => c.toUpperCase());
 
 type Tx = {
   orderId: string;
@@ -115,11 +120,23 @@ export const AdminDashboard: React.FC = () => {
   const [detailData, setDetailData] = useState<OrderDetailResponse | AuditLogDetailResponse | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const [role, setRole] = React.useState<UserRole | null>(null);
   const isStaff = role === UserRole.STAFF;
   const basePath = isStaff ? '/staff' : '/admin';
+  const [adminEvents, setAdminEvents] = useState<Event[]>([]);
+  const selectedEventId = searchParams.get('eventId') || '';
+
+  React.useEffect(() => {
+    apiService.getAdminEvents().then(setAdminEvents).catch(() => setAdminEvents([]));
+  }, []);
+
+  const handleEventFilterChange = (eventId: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (eventId) next.set('eventId', eventId); else next.delete('eventId');
+    setSearchParams(next);
+  };
 
 
   React.useEffect(() => {
@@ -150,7 +167,7 @@ export const AdminDashboard: React.FC = () => {
     setTxFetching(true);
     if (pageToLoad === 1) setTxLoading(true);
     try {
-      const data = await apiService.getRecentTransactions(pageToLoad, PAGE_SIZE);
+      const data = await apiService.getRecentTransactions(pageToLoad, PAGE_SIZE, selectedEventId || undefined);
       const items = data?.items || [];
       const pagination = data?.pagination;
       setTransactions(prev => (pageToLoad === 1 ? items : [...prev, ...items]));
@@ -169,7 +186,7 @@ export const AdminDashboard: React.FC = () => {
     setOrdersFetching(true);
     if (pageToLoad === 1) setOrdersLoading(true);
     try {
-      const data = await apiService.getRecentOrders(pageToLoad, PAGE_SIZE);
+      const data = await apiService.getRecentOrders(pageToLoad, PAGE_SIZE, selectedEventId || undefined);
       const items = data?.items || [];
       const pagination = data?.pagination;
       setOrders(prev => (pageToLoad === 1 ? items : [...prev, ...items]));
@@ -341,6 +358,7 @@ export const AdminDashboard: React.FC = () => {
 
     const { order, event, orderItems = [], attendees = [], tickets = [], payments = [] } = details;
     const company = order?.metadata && typeof order.metadata === 'object' ? order.metadata.company : null;
+    const appliedCoupon = order?.metadata && typeof order.metadata === 'object' ? order.metadata.coupon : null;
     const eventLabel = event?.eventName || 'Event details unavailable';
     const eventIdLabel = event?.eventId || order?.eventId || null;
 
@@ -359,6 +377,15 @@ export const AdminDashboard: React.FC = () => {
                 <p className="text-xs text-[#2E2E2F]">Expires {formatDate(order?.expiresAt)}</p>
               )}
               <p className="text-sm font-black text-[#2E2E2F]">{order?.currency || 'PHP'} {Number(order?.totalAmount || 0).toLocaleString()}</p>
+              {appliedCoupon && (
+                <div className="pt-2 mt-2 border-t border-[#2E2E2F]/10">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-[#2E2E2F]/60">Coupon Applied</p>
+                  <p className="text-xs text-[#2E2E2F] font-bold mt-0.5">
+                    {appliedCoupon.code} — {appliedCoupon.discountType === 'PERCENT' ? `${appliedCoupon.discountValue}%` : `${order?.currency || 'PHP'} ${appliedCoupon.discountValue}`} off
+                    <span className="font-normal text-[#2E2E2F]/70"> (saved {order?.currency || 'PHP'} {Number(appliedCoupon.discountAmount || 0).toLocaleString()})</span>
+                  </p>
+                </div>
+              )}
             </div>
           </div>
           <div className="rounded-2xl border border-[#2E2E2F]/20 bg-[#F2F2F2] p-4">
@@ -427,6 +454,13 @@ export const AdminDashboard: React.FC = () => {
                     <span>Phone: {att.phoneNumber || '—'}</span>
                     <span>Company: {att.company || '—'}</span>
                   </div>
+                  {att.responses && Object.keys(att.responses).length > 0 && (
+                    <div className="flex flex-wrap gap-3 text-[11px] text-[#2E2E2F] mt-2">
+                      {Object.entries(att.responses).map(([key, value]) => (
+                        <span key={key}>{humanizeFieldKey(key)}: {typeof value === 'boolean' ? (value ? 'Yes' : 'No') : (value as string || '—')}</span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -535,6 +569,11 @@ export const AdminDashboard: React.FC = () => {
               <p className="text-xs text-[#2E2E2F]">{attendee?.email || '—'}</p>
               <p className="text-xs text-[#2E2E2F]">Phone: {attendee?.phoneNumber || '—'}</p>
               <p className="text-xs text-[#2E2E2F]">Company: {attendee?.company || '—'}</p>
+              {attendee?.responses && Object.keys(attendee.responses).length > 0 && (
+                Object.entries(attendee.responses).map(([key, value]: [string, any]) => (
+                  <p key={key} className="text-xs text-[#2E2E2F]">{humanizeFieldKey(key)}: {typeof value === 'boolean' ? (value ? 'Yes' : 'No') : (value || '—')}</p>
+                ))
+              )}
             </div>
           </div>
           <div className="rounded-2xl border border-[#2E2E2F]/20 bg-[#F2F2F2] p-4">
@@ -681,7 +720,7 @@ export const AdminDashboard: React.FC = () => {
 
   React.useEffect(() => {
     if (!isStaff) {
-      apiService.getAnalytics().then(data => {
+      apiService.getAnalytics(selectedEventId || undefined).then(data => {
         setStats(data);
         setLoading(false);
       });
@@ -689,7 +728,7 @@ export const AdminDashboard: React.FC = () => {
       loadOrders(1);
       loadAuditLogs(1);
     }
-  }, [isStaff]);
+  }, [isStaff, selectedEventId]);
 
   if (isStaff) {
     return (
@@ -712,9 +751,24 @@ export const AdminDashboard: React.FC = () => {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold text-[#2E2E2F] tracking-tight">Dashboard Overview</h1>
-        <p className="text-[#2E2E2F] font-medium">See your latest registrations, tickets, and revenue at a glance.</p>
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-[#2E2E2F] tracking-tight">Dashboard Overview</h1>
+          <p className="text-[#2E2E2F] font-medium">See your latest registrations, tickets, and revenue at a glance.</p>
+        </div>
+        <div className="space-y-1.5 w-full sm:w-72">
+          <label className="block text-[10px] font-black text-[#2E2E2F]/60 uppercase tracking-[0.2em]">Event</label>
+          <select
+            className="block w-full px-3 py-2.5 bg-[#F2F2F2] border border-[#2E2E2F]/20 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#38BDF2]/40 transition-colors font-medium text-sm"
+            value={selectedEventId}
+            onChange={(e) => handleEventFilterChange(e.target.value)}
+          >
+            <option value="">All Events</option>
+            {adminEvents.map((ev) => (
+              <option key={ev.eventId} value={ev.eventId}>{ev.eventName}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

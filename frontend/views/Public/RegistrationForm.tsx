@@ -4,6 +4,7 @@ import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { apiService } from '../../services/apiService';
 import { Event, TicketType } from '../../types';
 import { Button, Card, Input, PageLoader } from '../../components/Shared';
+import { CountryCodeSelect, COUNTRIES, formatPhoneNumber } from '../../components/CountryCodeSelect';
 import { ICONS } from '../../constants';
 
 const PAYMENT_METHODS = [
@@ -42,9 +43,28 @@ export const RegistrationForm: React.FC = () => {
     company: '',
     termsAccepted: false
   });
+  const [phoneDialCode, setPhoneDialCode] = useState('+63');
+  const handlePhoneDialCodeChange = (dial: string) => {
+    setPhoneDialCode(dial);
+    // Re-group already-typed digits to the newly selected country's pattern instead of
+    // leaving them stuck in the previous country's spacing.
+    setFormData(prev => ({ ...prev, phone: formatPhoneNumber(prev.phone, dial) }));
+  };
+
+  // Phase 3: values for admin-configured custom fields (see docs/dynamic-registration-fields-plan.md).
+  // Only used/rendered when the event has a non-empty formFields config.
+  const [customFieldValues, setCustomFieldValues] = useState<Record<string, string | boolean>>({});
 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [paymentMethodId, setPaymentMethodId] = useState(PAYMENT_METHODS[0].id);
+
+  // Coupon field lives on this page (see docs/coupon-feature-plan.md) — entered and applied
+  // directly here rather than on the event page, so it's validated against the exact final
+  // subtotal being checked out, with no risk of the selection changing in between.
+  const [couponInput, setCouponInput] = useState('');
+  const [appliedCoupon, setAppliedCoupon] = useState<{ code: string; discountAmount: number } | null>(null);
+  const [couponError, setCouponError] = useState('');
+  const [couponValidating, setCouponValidating] = useState(false);
 
   useEffect(() => {
     if (slug) {
@@ -70,21 +90,71 @@ export const RegistrationForm: React.FC = () => {
   }, [slug, searchParams]);
 
   const subtotal = selectedItems.reduce((acc, item) => acc + (item.ticket.priceAmount * item.qty), 0);
+
+  // Coupons only make sense against a real charge — a free selection has nothing to discount,
+  // and the backend rejects a coupon on a $0 order anyway, so keep the UI consistent with that.
+  const couponEligible = subtotal > 0;
+
+  const handleApplyCoupon = async () => {
+    if (!event) return;
+    const code = couponInput.trim();
+    if (!code) return;
+    setCouponError('');
+    setCouponValidating(true);
+    try {
+      const result = await apiService.validateCoupon(event.eventId, code, subtotal);
+      if (result.valid && result.discountAmount !== undefined) {
+        setAppliedCoupon({ code: result.code || code.toUpperCase(), discountAmount: result.discountAmount });
+      } else {
+        setAppliedCoupon(null);
+        setCouponError(result.error || 'Invalid coupon code');
+      }
+    } catch {
+      setAppliedCoupon(null);
+      setCouponError('Failed to validate coupon. Please try again.');
+    } finally {
+      setCouponValidating(false);
+    }
+  };
+
+  const handleRemoveCoupon = () => {
+    setAppliedCoupon(null);
+    setCouponInput('');
+    setCouponError('');
+  };
+
+  const discountAmount = appliedCoupon?.discountAmount || 0;
+  const discountedSubtotal = Math.max(0, subtotal - discountAmount);
   const totalQuantity = selectedItems.reduce((acc, item) => acc + item.qty, 0);
   const selectedPayment = PAYMENT_METHODS.find((method) => method.id === paymentMethodId) ?? PAYMENT_METHODS[0];
   let paymentFee = 0;
-  if (subtotal > 0) {
-    paymentFee = roundCurrency(subtotal * selectedPayment.feeRate);
+  if (discountedSubtotal > 0) {
+    paymentFee = roundCurrency(discountedSubtotal * selectedPayment.feeRate);
   }
-  const totalPayable = roundCurrency(subtotal + paymentFee);
+  const totalPayable = roundCurrency(discountedSubtotal + paymentFee);
   const hasPaid = totalPayable > 0;
+
+  // Admin-configured fields for this event (Name, Email, and Phone are always fixed and never
+  // appear here — see RESERVED_FIELD_KEYS). An event with no fields configured shows only
+  // Name + Email + Contact Number; Company and anything else is added explicitly by an admin
+  // via the Events Management form-fields builder.
+  const configuredFields = event?.formFields || [];
 
   const validate = () => {
     const newErrors: Record<string, string> = {};
     if (!formData.name) newErrors.name = 'Full name is required';
     if (!formData.email) newErrors.email = 'Email is required';
     else if (!/\S+@\S+\.\S+/.test(formData.email)) newErrors.email = 'Invalid email format';
+    if (!formData.phone) newErrors.phone = 'Contact number is required';
     if (!formData.termsAccepted) newErrors.terms = 'You must accept the terms';
+
+    for (const field of configuredFields) {
+      if (!field.required) continue;
+      const value = customFieldValues[field.key];
+      const isMissing = field.type === 'checkbox' ? value !== true : !value?.toString().trim();
+      if (isMissing) newErrors[field.key] = `${field.label} is required`;
+    }
+
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -95,16 +165,22 @@ export const RegistrationForm: React.FC = () => {
 
     setSubmitting(true);
     try {
-      const { orderId } = await apiService.createOrderTransaction({
+      // Built as a variable (not an inline literal) so the extra `customFields` property
+      // doesn't require widening apiService.createOrderTransaction's parameter type —
+      // the backend (Phase 1) already reads it, and legacy events simply omit it.
+      const orderPayload = {
         eventId: event.eventId,
         buyerName: formData.name,
         buyerEmail: formData.email,
-        buyerPhone: formData.phone,
+        buyerPhone: `${phoneDialCode} ${formData.phone}`.trim(),
         company: formData.company,
         items: selectedItems.map(i => ({ ticketTypeId: i.ticket.ticketTypeId, quantity: i.qty, price: i.ticket.priceAmount })),
         totalAmount: totalPayable,
-        currency: selectedItems[0]?.ticket.currency || 'PHP'
-      });
+        currency: selectedItems[0]?.ticket.currency || 'PHP',
+        ...(configuredFields.length > 0 ? { customFields: customFieldValues } : {}),
+        ...(appliedCoupon ? { couponCode: appliedCoupon.code } : {})
+      };
+      const { orderId } = await apiService.createOrderTransaction(orderPayload);
       if (!hasPaid) {
         navigate(`/payment/status?sessionId=${orderId}`); // Free order also goes to status page for confirmation
       } else {
@@ -167,7 +243,7 @@ export const RegistrationForm: React.FC = () => {
 
           <div className="flex-1 w-full">
             <form onSubmit={handleSubmit} className="space-y-6 sm:space-y-8">
-              <Card className="p-5 sm:p-6 lg:p-8 border border-[#2E2E2F]/10 rounded-[1.75rem] sm:rounded-[2.5rem] bg-[#F2F2F2] relative overflow-hidden">
+              <Card className="p-5 sm:p-6 lg:p-8 border border-[#2E2E2F]/10 rounded-[1.75rem] sm:rounded-[2.5rem] bg-[#F2F2F2] relative">
                 <div className="relative z-10">
                   <div className="flex items-center justify-center gap-5 mb-6 sm:mb-8">
                     <div className="w-12 h-px bg-[#2E2E2F]/10"></div>
@@ -177,7 +253,7 @@ export const RegistrationForm: React.FC = () => {
                     <div className="w-12 h-px bg-[#2E2E2F]/10"></div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-x-5 sm:gap-x-6 gap-y-5 sm:gap-y-6">
+                  <div className="grid grid-cols-1 gap-y-6 sm:gap-y-7">
                     <div className="space-y-2">
                       <label className="text-[13px] font-medium text-[#2E2E2F]/70 ml-1">Full Name *</label>
                       <Input
@@ -200,25 +276,73 @@ export const RegistrationForm: React.FC = () => {
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-[13px] font-medium text-[#2E2E2F]/70 ml-1">Contact Number</label>
-                      <Input
-                        placeholder="+63 ...."
-                        className="py-3 sm:py-4 px-4 sm:px-5 rounded-[1rem] font-normal bg-[#F2F2F2] border border-[#2E2E2F]/20 focus:bg-[#F2F2F2] focus:border-[#38BDF2]/40 text-[#2E2E2F] placeholder:text-[#2E2E2F]/40 transition-colors text-[14px]"
-                        value={formData.phone}
-                        onChange={(e: any) => setFormData({ ...formData, phone: e.target.value })}
-                      />
+                      <label className="text-[13px] font-medium text-[#2E2E2F]/70 ml-1">Contact Number *</label>
+                      <div className="flex items-stretch">
+                        <CountryCodeSelect value={phoneDialCode} onChange={handlePhoneDialCodeChange} />
+                        <input
+                          type="tel"
+                          inputMode="numeric"
+                          placeholder={COUNTRIES.find(c => c.dial === phoneDialCode)?.example || '917 123 4567'}
+                          className={`flex-1 min-w-0 py-3 sm:py-4 px-4 sm:px-5 rounded-r-[1rem] font-normal bg-[#F2F2F2] border ${errors.phone ? 'border-[#2E2E2F]' : 'border-[#2E2E2F]/20'} focus:bg-[#F2F2F2] focus:border-[#38BDF2]/40 focus:outline-none focus:ring-2 ${errors.phone ? 'focus:ring-[#2E2E2F]/30' : 'focus:ring-[#38BDF2]/30'} text-[#2E2E2F] placeholder:text-[#2E2E2F]/40 transition-colors text-[14px]`}
+                          value={formData.phone}
+                          onChange={(e) => setFormData({ ...formData, phone: formatPhoneNumber(e.target.value, phoneDialCode) })}
+                        />
+                      </div>
+                      {errors.phone && <p className="text-xs text-[#2E2E2F] mt-1 ml-1">{errors.phone}</p>}
                     </div>
-                    <div className="space-y-2">
-                      <label className="text-[13px] font-medium text-[#2E2E2F]/70 ml-1">Company</label>
-                      <Input
-                        placeholder="Organization / Entity"
-                        className="py-3 sm:py-4 px-4 sm:px-5 rounded-[1rem] font-normal bg-[#F2F2F2] border border-[#2E2E2F]/20 focus:bg-[#F2F2F2] focus:border-[#38BDF2]/40 text-[#2E2E2F] placeholder:text-[#2E2E2F]/40 transition-colors text-[14px]"
-                        value={formData.company}
-                        onChange={(e: any) => setFormData({ ...formData, company: e.target.value })}
-                      />
-                    </div>
+                    {configuredFields.map((field) => (
+                      <div key={field.key} className="space-y-2">
+                        {field.type === 'checkbox' ? (
+                          <label className={`flex items-center gap-3 cursor-pointer select-none py-3 sm:py-3.5 px-4 sm:px-5 rounded-[1rem] border transition-colors ${errors[field.key] ? 'border-[#2E2E2F]' : 'border-[#2E2E2F]/20 hover:border-[#38BDF2]/40'}`}>
+                            <input
+                              type="checkbox"
+                              checked={customFieldValues[field.key] === true}
+                              onChange={(e) => setCustomFieldValues({ ...customFieldValues, [field.key]: e.target.checked })}
+                              className="w-5 h-5 shrink-0 accent-[#38BDF2] cursor-pointer"
+                            />
+                            <span className="text-[14px] font-medium text-[#2E2E2F]/70">
+                              {field.label}{field.required ? ' *' : ''}
+                            </span>
+                          </label>
+                        ) : null}
+                        {field.type === 'checkbox' && errors[field.key] && (
+                          <p className="text-[11px] font-semibold text-[#2E2E2F] ml-1">{errors[field.key]}</p>
+                        )}
+                        {field.type !== 'checkbox' && (
+                          <>
+                            <label className="text-[13px] font-medium text-[#2E2E2F]/70 ml-1">
+                              {field.label}{field.required ? ' *' : ''}
+                            </label>
+                            {field.type === 'select' ? (
+                              <select
+                                className={`w-full py-3 sm:py-4 px-4 sm:px-5 rounded-[1rem] font-normal bg-[#F2F2F2] border ${errors[field.key] ? 'border-[#2E2E2F]' : 'border-[#2E2E2F]/20'} focus:bg-[#F2F2F2] focus:border-[#38BDF2]/40 focus:outline-none focus:ring-2 ${errors[field.key] ? 'focus:ring-[#2E2E2F]/30' : 'focus:ring-[#38BDF2]/30'} text-[#2E2E2F] transition-colors text-[14px]`}
+                                value={(customFieldValues[field.key] as string) || ''}
+                                onChange={(e) => setCustomFieldValues({ ...customFieldValues, [field.key]: e.target.value })}
+                              >
+                                <option value="" disabled>Select an option</option>
+                                {(field.options || []).map((opt) => (
+                                  <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <Input
+                                type={field.type === 'email' ? 'email' : field.type === 'phone' ? 'tel' : 'text'}
+                                placeholder={field.label}
+                                className="py-3 sm:py-4 px-4 sm:px-5 rounded-[1rem] font-normal bg-[#F2F2F2] border border-[#2E2E2F]/20 focus:bg-[#F2F2F2] focus:border-[#38BDF2]/40 text-[#2E2E2F] placeholder:text-[#2E2E2F]/40 transition-colors text-[14px]"
+                                value={(customFieldValues[field.key] as string) || ''}
+                                onChange={(e: any) => setCustomFieldValues({ ...customFieldValues, [field.key]: e.target.value })}
+                                error={errors[field.key]}
+                              />
+                            )}
+                            {errors[field.key] && field.type === 'select' && (
+                              <p className="text-[11px] font-semibold text-[#2E2E2F] ml-1">{errors[field.key]}</p>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    ))}
 
-                    <div className="md:col-span-2 pt-4 border-t border-[#2E2E2F]/10 space-y-4">
+                    <div className="pt-4 border-t border-[#2E2E2F]/10 space-y-4">
                       <div className="flex items-center justify-between">
                         <p className="text-[12px] font-semibold text-[#2E2E2F] uppercase tracking-wide">Payment Method</p>
                       </div>
@@ -243,7 +367,7 @@ export const RegistrationForm: React.FC = () => {
                       </div>
                     </div>
 
-                    <div className="md:col-span-2 pt-4 border-t border-[#2E2E2F]/10 space-y-4">
+                    <div className="pt-4 border-t border-[#2E2E2F]/10 space-y-4">
                       <label className="flex items-start gap-4 cursor-pointer group select-none">
                         <div className="relative mt-1">
                           <input
@@ -257,7 +381,7 @@ export const RegistrationForm: React.FC = () => {
                           </div>
                         </div>
                         <span className="text-sm font-medium text-[#2E2E2F]/70 leading-relaxed group-hover:text-[#2E2E2F] transition-colors">
-                          I acknowledge that I have read and agree to the <a href="#" className="text-[#2E2E2F] font-bold hover:text-[#38BDF2] hover:underline">Terms and Conditions</a> and <a href="#" className="text-[#2E2E2F] font-bold hover:text-[#38BDF2] hover:underline">Privacy Policy</a> governing this event session.
+                          I acknowledge that I have read and agree to the <a href="#/terms" target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="text-[#2E2E2F] font-bold hover:text-[#38BDF2] hover:underline">Terms and Conditions</a> and <a href="#/privacy" target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="text-[#2E2E2F] font-bold hover:text-[#38BDF2] hover:underline">Privacy Policy</a> governing this event session.
                         </span>
                       </label>
                       {errors.terms && <p className="text-[11px] font-semibold text-[#2E2E2F] uppercase tracking-wide pl-10">{errors.terms}</p>}
@@ -341,6 +465,51 @@ export const RegistrationForm: React.FC = () => {
                     ))}
                   </div>
 
+                  {/* Coupon field — only offered on a real charge; a free selection has nothing to discount */}
+                  {couponEligible && (
+                    <div className="pt-5 sm:pt-6 border-t border-[#2E2E2F]/10">
+                      {appliedCoupon ? (
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <span className="text-[10px] font-medium text-[#38BDF2] uppercase tracking-wide">Coupon {appliedCoupon.code} applied</span>
+                          </div>
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className="text-[11px] sm:text-[12px] font-semibold tracking-wide text-[#38BDF2]">−PHP {formatCurrency(discountAmount)}</span>
+                            <button
+                              type="button"
+                              onClick={handleRemoveCoupon}
+                              className="text-[10px] font-black uppercase tracking-widest text-[#2E2E2F]/50 hover:text-[#2E2E2F] transition-colors"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          <div className="flex items-stretch gap-2">
+                            <input
+                              type="text"
+                              placeholder="Coupon code"
+                              value={couponInput}
+                              onChange={(e) => { setCouponInput(e.target.value.toUpperCase()); setCouponError(''); }}
+                              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleApplyCoupon(); } }}
+                              className={`flex-1 min-w-0 px-4 py-3 rounded-xl border bg-[#F2F2F2] text-[13px] font-medium uppercase tracking-wide text-[#2E2E2F] placeholder:text-[#2E2E2F]/40 placeholder:normal-case focus:outline-none focus:ring-2 ${couponError ? 'border-[#2E2E2F] focus:ring-[#2E2E2F]/30' : 'border-[#2E2E2F]/20 focus:ring-[#38BDF2]/30 focus:border-[#38BDF2]/40'} transition-colors`}
+                            />
+                            <button
+                              type="button"
+                              onClick={handleApplyCoupon}
+                              disabled={!couponInput.trim() || couponValidating}
+                              className="shrink-0 px-5 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest bg-[#38BDF2] text-[#F2F2F2] hover:bg-[#2E2E2F] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {couponValidating ? '...' : 'Apply'}
+                            </button>
+                          </div>
+                          {couponError && <p className="text-[11px] font-semibold text-[#2E2E2F] ml-1">{couponError}</p>}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {/* Fee Breakdown */}
                   <div className="pt-5 sm:pt-6 border-t border-[#2E2E2F]/10 space-y-4">
                     <div className="flex justify-between items-center text-[#2E2E2F]/60">
@@ -349,7 +518,7 @@ export const RegistrationForm: React.FC = () => {
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-[10px] font-medium text-[#2E2E2F]/60 uppercase tracking-wide">HitPay Service Fee</span>
-                      {subtotal === 0 ? (
+                      {discountedSubtotal === 0 ? (
                         <span className="text-[10px] font-semibold text-[#2E2E2F] border border-[#38BDF2]/40 px-2.5 py-0.5 rounded-lg tracking-wide bg-[#38BDF2]/10">
                           WAIVED
                         </span>

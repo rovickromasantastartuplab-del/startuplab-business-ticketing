@@ -48,7 +48,7 @@ const loadOrderDetails = async (orderId) => {
       .eq('orderId', orderId),
     supabase
       .from('attendees')
-      .select('attendeeId, name, email, phoneNumber, company')
+      .select('attendeeId, name, email, phoneNumber, company, responses')
       .eq('orderId', orderId),
     supabase
       .from('tickets')
@@ -121,7 +121,7 @@ const loadTicketDetails = async (ticketId) => {
     ticket.attendeeId
       ? supabase
           .from('attendees')
-          .select('attendeeId, name, email, phoneNumber, company')
+          .select('attendeeId, name, email, phoneNumber, company, responses')
           .eq('attendeeId', ticket.attendeeId)
           .maybeSingle()
       : Promise.resolve({ data: null, error: null }),
@@ -162,12 +162,16 @@ const loadTicketDetails = async (ticketId) => {
   };
 };
 
-export const getSummary = async (_req, res) => {
+export const getSummary = async (req, res) => {
   try {
+    const eventId = (req.query?.eventId || '').toString().trim();
+
     // Tickets and attendance
-    const { data: tickets, error: ticketErr } = await supabase
+    let ticketsQuery = supabase
       .from('tickets')
-      .select('ticketId, status, issuedAt');
+      .select('ticketId, eventId, status, issuedAt');
+    if (eventId) ticketsQuery = ticketsQuery.eq('eventId', eventId);
+    const { data: tickets, error: ticketErr } = await ticketsQuery;
     if (ticketErr) return res.status(500).json({ error: ticketErr.message });
 
     const totalRegistrations = tickets?.length || 0;
@@ -175,15 +179,21 @@ export const getSummary = async (_req, res) => {
     const attendanceRate = totalRegistrations ? (usedCount / totalRegistrations) * 100 : 0;
 
     // Orders and revenue
-    const { data: orders, error: orderErr } = await supabase
+    let ordersQuery = supabase
       .from('orders')
-      .select('orderId, totalAmount, status, created_at');
+      .select('orderId, eventId, totalAmount, status, created_at');
+    if (eventId) ordersQuery = ordersQuery.eq('eventId', eventId);
+    const { data: orders, error: orderErr } = await ordersQuery;
     if (orderErr) return res.status(500).json({ error: orderErr.message });
 
     const paidOrders = (orders || []).filter(o => o.status === 'PAID');
     const totalRevenue = paidOrders.reduce((sum, o) => sum + (o.totalAmount || 0), 0);
-    const paymentSuccessRate = (orders || []).length
-      ? (paidOrders.length / orders.length) * 100
+
+    // Payment success should only reflect real money transactions, not free ($0) orders.
+    const paidMoneyOrders = (orders || []).filter(o => (o.totalAmount || 0) > 0);
+    const succeededMoneyOrders = paidMoneyOrders.filter(o => o.status === 'PAID');
+    const paymentSuccessRate = paidMoneyOrders.length
+      ? (succeededMoneyOrders.length / paidMoneyOrders.length) * 100
       : 0;
 
     // Today ranges
@@ -212,11 +222,14 @@ export const getSummary = async (_req, res) => {
 export const getRecentTransactions = async (req, res) => {
   try {
     const { page, limit, from, to } = resolvePagination(req);
-    const { data, error, count } = await supabase
+    const eventId = (req.query?.eventId || '').toString().trim();
+    let query = supabase
       .from('orders')
       .select('orderId, eventId, buyerName, totalAmount, currency, status, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(from, to);
+    if (eventId) query = query.eq('eventId', eventId);
+    const { data, error, count } = await query;
     if (error) return res.status(500).json({ error: error.message });
     const total = typeof count === 'number' ? count : 0;
     const items = data || [];
@@ -348,11 +361,14 @@ export const getAuditLogDetail = async (req, res) => {
 export const getRecentOrders = async (req, res) => {
   try {
     const { page, limit, from, to } = resolvePagination(req);
-    const { data, error, count } = await supabase
+    const eventId = (req.query?.eventId || '').toString().trim();
+    let query = supabase
       .from('orders')
       .select('orderId, eventId, buyerName, buyerEmail, totalAmount, currency, status, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(from, to);
+    if (eventId) query = query.eq('eventId', eventId);
+    const { data, error, count } = await query;
     if (error) return res.status(500).json({ error: error.message });
     const total = typeof count === 'number' ? count : 0;
     const items = data || [];

@@ -15,6 +15,35 @@ function slugify(text = '') {
     .replace(/^-+|-+$/g, '');
 }
 
+// Keys that always exist as fixed fields (name/email) or are legacy fixed columns
+// (phone/company) — a custom field's key can never collide with these.
+const RESERVED_FIELD_KEYS = ['name', 'email', 'phone', 'company'];
+
+// Returns an error string, or null if the formFields payload is valid.
+// Accepts undefined/null (no-op — legacy behavior) and an empty array.
+function validateFormFields(formFields) {
+  if (formFields === undefined || formFields === null) return null;
+  if (!Array.isArray(formFields)) return 'formFields must be an array';
+
+  const seenKeys = new Set();
+  for (const field of formFields) {
+    if (!field || typeof field !== 'object') return 'Each form field must be an object';
+    const { key, label, type, required } = field;
+    if (!key || typeof key !== 'string') return 'Each form field requires a string key';
+    if (!label || typeof label !== 'string') return 'Each form field requires a string label';
+    if (!['text', 'email', 'phone', 'select', 'checkbox'].includes(type)) {
+      return `Invalid field type "${type}" for field "${label}"`;
+    }
+    if (typeof required !== 'boolean') return `Field "${label}" must specify required as true/false`;
+    if (RESERVED_FIELD_KEYS.includes(key)) {
+      return `Field key "${key}" collides with a fixed field (name, email, phone, company)`;
+    }
+    if (seenKeys.has(key)) return `Duplicate field key "${key}"`;
+    seenKeys.add(key);
+  }
+  return null;
+}
+
 export const listAdminEvents = async (req, res) => {
   try {
     const search = (req.query?.search || '').toString().trim();
@@ -112,10 +141,14 @@ export const createEvent = async (req, res) => {
       status = 'DRAFT',
       imageUrl,
       streamingPlatform,
+      formFields,
       createdBy: createdByFromBody
     } = req.body || {};
 
     if (!eventName) return res.status(400).json({ error: 'eventName is required' });
+
+    const formFieldsError = validateFormFields(formFields);
+    if (formFieldsError) return res.status(400).json({ error: formFieldsError });
 
     const payload = {
       eventName,
@@ -132,6 +165,7 @@ export const createEvent = async (req, res) => {
       status,
       imageUrl: imageUrl || null,
       streamingPlatform: streamingPlatform || null,
+      formFields: formFields ?? null,
       createdBy: req.user?.id || createdByFromBody || null,
       updated_at: new Date().toISOString()
     };
@@ -153,6 +187,11 @@ export const updateEvent = async (req, res) => {
   try {
     const { id } = req.params;
     const updates = { ...req.body };
+
+    if (updates.formFields !== undefined) {
+      const formFieldsError = validateFormFields(updates.formFields);
+      if (formFieldsError) return res.status(400).json({ error: formFieldsError });
+    }
 
     if (updates.capacityTotal !== undefined) {
       updates.capacityTotal = Number.isFinite(Number(updates.capacityTotal))

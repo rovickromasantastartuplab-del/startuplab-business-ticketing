@@ -6,6 +6,8 @@ import { EventDetails } from './views/Public/EventDetails';
 import { RegistrationForm } from './views/Public/RegistrationForm';
 import { PaymentStatusView } from './views/Public/PaymentStatus';
 import { TicketView } from './views/Public/TicketView';
+import { Terms } from './views/Public/Terms';
+import { PrivacyPolicy } from './views/Public/PrivacyPolicy';
 import { AdminDashboard } from './views/Admin/Dashboard';
 import { EventsManagement } from './views/Admin/EventsManagement';
 import { RegistrationsList } from './views/Admin/RegistrationsList';
@@ -16,11 +18,12 @@ import { SignUpView } from './views/Auth/SignUp';
 import { AcceptInvite } from './views/Auth/AcceptInvite';
 import { ForgotPassword } from './views/Auth/ForgotPassword';
 import { ResetPassword } from './views/Auth/ResetPassword';
-import { ICONS } from './constants';
+import { ICONS, SOCIAL_ICONS } from './constants';
 import { Button, Input, Modal } from './components/Shared';
-import { UserRole } from './types';
+import { UserRole, FooterLink, FooterColumn } from './types';
 import { supabase } from "./supabase/supabaseClient.js";
 import { useUser } from './context/UserContext';
+import { apiService } from './services/apiService';
 const API = import.meta.env.VITE_API_BASE;
 const Branding: React.FC<{ className?: string, light?: boolean }> = ({ className = '', light = false }) => (
   <img
@@ -513,55 +516,88 @@ const PortalLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => 
   );
 };
 
-const PublicLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div className="min-h-screen flex flex-col bg-[#F2F2F2]">
-    <header className="h-20 bg-[#F2F2F2] border-b border-[#2E2E2F]/10 px-8 sticky top-0 z-50">
-      <div className="max-w-7xl mx-auto h-full flex items-center justify-between">
-        <Link to="/">
-          <Branding className="text-xl lg:text-2xl" />
-        </Link>
-        <nav className="flex items-center gap-10">
-          <Link to="/" className="text-[11px] font-black uppercase tracking-[0.3em] text-[#2E2E2F]/70 hover:text-[#38BDF2] transition-colors hidden sm:block">
-            EVENTS
+const PublicLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [footerLinks, setFooterLinks] = React.useState<FooterLink[]>([]);
+  const [footerColumns, setFooterColumns] = React.useState<FooterColumn[]>([]);
+  React.useEffect(() => {
+    apiService.getFooterLinks().then(setFooterLinks).catch(() => setFooterLinks([]));
+    apiService.getFooterColumns().then(setFooterColumns).catch(() => setFooterColumns([]));
+  }, []);
+  const socialLinks = footerLinks.filter(l => l.type === 'SOCIAL');
+  const linksByColumn = (columnId: string) => footerLinks.filter(l => l.type === 'CUSTOM' && l.columnId === columnId);
+
+  return (
+    <div className="min-h-screen flex flex-col bg-[#F2F2F2]">
+      <header className="h-20 bg-[#F2F2F2] border-b border-[#2E2E2F]/10 px-8 sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto h-full flex items-center justify-between">
+          <Link to="/">
+            <Branding className="text-xl lg:text-2xl" />
           </Link>
-        </nav>
-      </div>
-    </header>
-    <main className="flex-1">{children}</main>
-    <footer className="bg-[#F2F2F2] text-[#2E2E2F]/70 py-16 px-8 border-t border-[#2E2E2F]/10">
-      <div className="max-w-7xl mx-auto">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 mb-12">
-          <div>
-            <Branding className="text-2xl" />
-            <p className="mt-4 text-sm font-medium max-w-sm text-[#2E2E2F]/70 leading-relaxed">
-              Your gateway to StartupLab events.<br />
-              From internal workshops to public showcases, this platform delivers seamless, secure registration for every StartupLab gathering.
-            </p>
-          </div>
-          <div className="grid grid-cols-2 gap-8 lg:text-right uppercase tracking-[0.2em] font-black text-[9px]">
-            <div className="space-y-4">
-              <p className="text-[#2E2E2F]/50 mb-4">Platform</p>
-              <Link to="/" className="block text-[#2E2E2F]/70 hover:text-[#38BDF2]">Events List</Link>
+          <nav className="flex items-center gap-10">
+            <Link to="/" className="text-[11px] font-black uppercase tracking-[0.3em] text-[#2E2E2F]/70 hover:text-[#38BDF2] transition-colors hidden sm:block">
+              EVENTS
+            </Link>
+          </nav>
+        </div>
+      </header>
+      <main className="flex-1">{children}</main>
+      <footer className="bg-[#F2F2F2] text-[#2E2E2F]/70 py-16 px-8 border-t border-[#2E2E2F]/10">
+        <div className="max-w-7xl mx-auto">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 mb-12">
+            <div>
+              <Branding className="text-2xl" />
+              <p className="mt-4 text-sm font-medium max-w-sm text-[#2E2E2F]/70 leading-relaxed">
+                Your gateway to StartupLab events.<br />
+                From internal workshops to public showcases, this platform delivers seamless, secure registration for every StartupLab gathering.
+              </p>
+              {socialLinks.length > 0 && (
+                <div className="flex items-center gap-3 mt-6">
+                  {socialLinks.map((link) => {
+                    const SocialIcon = link.platform ? SOCIAL_ICONS[link.platform] : null;
+                    if (!SocialIcon) return null;
+                    return (
+                      <a
+                        key={link.footerLinkId}
+                        href={link.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="w-9 h-9 rounded-xl bg-[#2E2E2F]/10 text-[#2E2E2F]/70 flex items-center justify-center hover:bg-[#38BDF2] hover:text-[#F2F2F2] transition-colors"
+                      >
+                        <SocialIcon className="w-4 h-4" />
+                      </a>
+                    );
+                  })}
+                </div>
+              )}
             </div>
-            <div className="space-y-4">
-              <p className="text-[#2E2E2F]/50 mb-4">Legal</p>
-              <a href="#" className="block text-[#2E2E2F]/70 hover:text-[#38BDF2]">Privacy</a>
-              <a href="#" className="block text-[#2E2E2F]/70 hover:text-[#38BDF2]">Terms</a>
+            {footerColumns.length > 0 && (
+              <div className="grid grid-cols-2 gap-8 lg:text-right uppercase tracking-[0.2em] font-black text-[9px]">
+                {footerColumns.map((column) => (
+                  <div key={column.footerColumnId} className="space-y-4">
+                    <p className="text-[#2E2E2F]/50 mb-4">{column.title}</p>
+                    {linksByColumn(column.footerColumnId).map((link) => (
+                      <a key={link.footerLinkId} href={link.url} className="block text-[#2E2E2F]/70 hover:text-[#38BDF2]">
+                        {link.label}
+                      </a>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="pt-8 border-t border-[#2E2E2F]/10 flex flex-col md:flex-row justify-between items-center gap-4">
+            <div className="text-[9px] uppercase tracking-[0.3em] font-black text-[#2E2E2F]/60">
+              © 2026 StartupLab Business Center
+            </div>
+            <div className="flex items-center gap-6 opacity-60 grayscale">
+              <img src="https://xmjdcbzgdfylbqkjoyyb.supabase.co/storage/v1/object/public/startuplab-business-ticketing/images/hitpay.png" alt="HitPay" className="h-3" />
             </div>
           </div>
         </div>
-        <div className="pt-8 border-t border-[#2E2E2F]/10 flex flex-col md:flex-row justify-between items-center gap-4">
-          <div className="text-[9px] uppercase tracking-[0.3em] font-black text-[#2E2E2F]/60">
-            © 2026 StartupLab Business Center
-          </div>
-          <div className="flex items-center gap-6 opacity-60 grayscale">
-            <img src="https://xmjdcbzgdfylbqkjoyyb.supabase.co/storage/v1/object/public/startuplab-business-ticketing/images/hitpay.png" alt="HitPay" className="h-3" />
-          </div>
-        </div>
-      </div>
-    </footer>
-  </div>
-);
+      </footer>
+    </div>
+  );
+};
 
 /** HashRouter + Supabase recovery links land as #access_token=...&type=recovery */
 const AuthRecoveryListener: React.FC = () => {
@@ -600,6 +636,8 @@ const App: React.FC = () => (
       <Route path="/events/:slug/register" element={<PublicLayout><RegistrationForm /></PublicLayout>} />
       <Route path="/payment/status" element={<PublicLayout><PaymentStatusView /></PublicLayout>} />
       <Route path="/tickets/:ticketId" element={<PublicLayout><TicketView /></PublicLayout>} />
+      <Route path="/terms" element={<PublicLayout><Terms /></PublicLayout>} />
+      <Route path="/privacy" element={<PublicLayout><PrivacyPolicy /></PublicLayout>} />
 
       <Route path="/dashboard" element={<PortalLayout><AdminDashboard /></PortalLayout>} />
       <Route path="/events" element={<PortalLayout><EventsManagement /></PortalLayout>} />
